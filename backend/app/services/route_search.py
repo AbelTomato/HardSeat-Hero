@@ -3,15 +3,17 @@ from decimal import Decimal
 
 from app.adapters.base import TrainDataProvider
 from app.domain.models import RouteQuery, RouteSearchResponse, TrainSegment, TransferPlan
+from app.services.cache import TtlCache
 
 
 class RouteSearchService:
-    def __init__(self, provider: TrainDataProvider) -> None:
+    def __init__(self, provider: TrainDataProvider, cache_ttl_seconds: int = 600) -> None:
         self.provider = provider
+        self.segment_cache: TtlCache[list[TrainSegment]] = TtlCache(cache_ttl_seconds)
 
     async def search(self, query: RouteQuery) -> RouteSearchResponse:
         plans: list[TransferPlan] = []
-        direct_segments = await self.provider.search_segments(query.from_station, query.to_station, query)
+        direct_segments = await self._search_segments(query.from_station, query.to_station, query)
         plans.extend(self._build_plan([segment]) for segment in direct_segments if segment.lowest_price is not None)
 
         if query.max_transfers >= 1:
@@ -27,11 +29,26 @@ class RouteSearchService:
             plans=plans[:20],
         )
 
+    async def _search_segments(
+        self,
+        from_station: str,
+        to_station: str,
+        query: RouteQuery,
+    ) -> list[TrainSegment]:
+        cache_key = self._segment_cache_key(from_station, to_station, query)
+        cached_segments = self.segment_cache.get(cache_key)
+        if cached_segments is not None:
+            return cached_segments
+
+        segments = await self.provider.search_segments(from_station, to_station, query)
+        self.segment_cache.set(cache_key, segments)
+        return segments
+
     async def _search_one_transfer(self, query: RouteQuery) -> list[TransferPlan]:
         plans: list[TransferPlan] = []
         for transfer_station in self.provider.candidate_transfer_stations(query):
-            first_legs = await self.provider.search_segments(query.from_station, transfer_station, query)
-            second_legs = await self.provider.search_segments(transfer_station, query.to_station, query)
+            first_legs = await self._search_segments(query.from_station, transfer_station, query)
+            second_legs = await self._search_segments(transfer_station, query.to_station, query)
             for first in first_legs:
                 for second in second_legs:
                     if first.lowest_price is None or second.lowest_price is None:
@@ -43,7 +60,7 @@ class RouteSearchService:
         return plans
 
     def _build_plan(self, segments: list[TrainSegment]) -> TransferPlan:
-        total_price = sum((segment.lowest_price or Decimal("0")) for segment in segments)
+        total_price = sum([segment.lowest_price or Decimal("0") for segment in segments], Decimal("0"))
         total_duration = int((segments[-1].arrive_at - segments[0].depart_at).total_seconds() // 60)
         ride_minutes = sum(segment.duration_minutes for segment in segments)
         transfer_stations = [segment.to_station for segment in segments[:-1]]
@@ -54,5 +71,19 @@ class RouteSearchService:
             transfer_stations=transfer_stations,
             segments=segments,
         )
+
+    def _segment_cache_key(self, from_station: str, to_station: str, query: RouteQuery) -> str:
+        return ":".join(
+            [
+                self.provider.name,
+                query.date.isoformat(),
+                from_station,
+                to_station,
+            ]
+        )
+
+
+
+
 
 

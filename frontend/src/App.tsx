@@ -2,7 +2,12 @@ import { FormEvent, ReactNode, useEffect, useState } from "react";
 import { ArrowRight, Clock, Loader2, Search, TrainFront } from "lucide-react";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
-import { RouteSearchResponse, searchRoutes, searchStations } from "./lib/api";
+import {
+  ApiError,
+  RouteSearchResponse,
+  searchRoutes,
+  searchStations,
+} from "./lib/api";
 
 const today = new Date().toISOString().slice(0, 10);
 
@@ -76,7 +81,7 @@ export function App() {
       });
       setResult(response);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "查询失败");
+      setError(formatSearchError(caught));
     } finally {
       setIsLoading(false);
     }
@@ -261,4 +266,20 @@ function formatDateTime(value: string) {
     minute: "2-digit",
     hour12: false,
   }).format(new Date(value));
+}
+
+function formatSearchError(caught: unknown) {
+  if (caught instanceof ApiError) {
+    if (caught.category === "data_source_unavailable") {
+      return `数据源不可用：${caught.message}`;
+    }
+    if (caught.category === "bad_request") {
+      return `查询参数错误：${caught.message}`;
+    }
+    return caught.message;
+  }
+  if (caught instanceof TypeError) {
+    return "后端服务不可用，请确认 API 服务已启动。";
+  }
+  return caught instanceof Error ? caught.message : "查询失败";
 }

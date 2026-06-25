@@ -7,6 +7,7 @@
 - 前端：React、TypeScript、Vite、Tailwind CSS、shadcn/ui 风格组件。
 - 后端：FastAPI、Pydantic、pytest。
 - 数据源：当前使用 Mock 数据源，后续通过 `TrainDataProvider` 接入 GitHub 开源项目或 MCP 查询工具。
+- 真实数据源：可通过 `TRAIN_DATA_PROVIDER=12306-public-price` 试用 12306 公布票价接口适配器；默认仍为 `mock`。
 
 ## 目录
 
@@ -25,6 +26,15 @@ python -m venv .venv
 pip install -e .[dev]
 uvicorn app.main:app --reload --port 8000
 ```
+
+默认使用 Mock 数据源。如需试用 12306 公布票价接口：
+
+```powershell
+$env:TRAIN_DATA_PROVIDER = "12306-public-price"
+uvicorn app.main:app --reload --port 8000
+```
+
+该接口不是公开稳定 API，失败时 API 会返回受控错误，Mock 数据源不受影响。
 
 健康检查：`http://localhost:8000/api/health`
 
