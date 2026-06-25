@@ -1,0 +1,1 @@
+"""HardSeat Hero backend package."""
