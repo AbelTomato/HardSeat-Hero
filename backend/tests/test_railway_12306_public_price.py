@@ -14,6 +14,8 @@ from app.adapters.railway_12306_public_price import (
     parse_price,
     parse_station_codes,
 )
+from app.adapters.static_price_fallback_provider import StaticPriceFallbackProvider
+from app.adapters.static_price_provider import LocalStaticPriceProvider
 from app.domain.models import RouteQuery
 from app.services.transfer_candidates import CandidateTransferStationGenerator, StationMetadataRepository
 
@@ -180,6 +182,70 @@ def test_provider_factory_supports_12306(monkeypatch) -> None:
     provider = create_train_data_provider()
 
     assert provider.name == "12306-public-price"
+
+
+def test_provider_factory_supports_static_price(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "static_prices.sqlite3"
+    monkeypatch.setenv("TRAIN_DATA_PROVIDER", "static-price")
+    monkeypatch.setenv("STATIC_PRICE_DB", str(db_path))
+    monkeypatch.setenv("STATIC_PRICE_MAX_AGE_DAYS", "30")
+
+    provider = create_train_data_provider()
+
+    assert isinstance(provider, LocalStaticPriceProvider)
+    assert provider.name == "static-price"
+    assert provider.repository.db_path == db_path
+    assert provider.max_age is not None
+    assert provider.max_age.days == 30
+
+
+def test_provider_factory_supports_static_price_remote_fallback(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("TRAIN_DATA_PROVIDER", "static-price")
+    monkeypatch.setenv("STATIC_PRICE_DB", str(tmp_path / "static_prices.sqlite3"))
+    monkeypatch.setenv("STATIC_PRICE_MODE", "static-with-remote-fallback")
+    monkeypatch.setenv("STATIC_PRICE_FALLBACK_PROVIDER", "12306-public-price")
+
+    provider = create_train_data_provider()
+
+    assert isinstance(provider, StaticPriceFallbackProvider)
+    assert provider.name == "static-price"
+    assert provider.fallback_provider.name == "12306-public-price"
+
+
+def test_provider_factory_static_price_rejects_unknown_mode(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("TRAIN_DATA_PROVIDER", "static-price")
+    monkeypatch.setenv("STATIC_PRICE_DB", str(tmp_path / "static_prices.sqlite3"))
+    monkeypatch.setenv("STATIC_PRICE_MODE", "unknown")
+
+    with pytest.raises(ValueError, match="Unsupported STATIC_PRICE_MODE"):
+        create_train_data_provider()
+
+
+def test_provider_factory_static_price_rejects_unknown_fallback_provider(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("TRAIN_DATA_PROVIDER", "static-price")
+    monkeypatch.setenv("STATIC_PRICE_DB", str(tmp_path / "static_prices.sqlite3"))
+    monkeypatch.setenv("STATIC_PRICE_MODE", "static-with-remote-fallback")
+    monkeypatch.setenv("STATIC_PRICE_FALLBACK_PROVIDER", "unknown")
+
+    with pytest.raises(ValueError, match="Unsupported STATIC_PRICE_FALLBACK_PROVIDER"):
+        create_train_data_provider()
+
+
+def test_provider_factory_static_price_requires_db(monkeypatch) -> None:
+    monkeypatch.setenv("TRAIN_DATA_PROVIDER", "static-price")
+    monkeypatch.delenv("STATIC_PRICE_DB", raising=False)
+
+    with pytest.raises(ValueError, match="STATIC_PRICE_DB is required"):
+        create_train_data_provider()
+
+
+def test_provider_factory_static_price_rejects_invalid_max_age(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("TRAIN_DATA_PROVIDER", "static-price")
+    monkeypatch.setenv("STATIC_PRICE_DB", str(tmp_path / "static_prices.sqlite3"))
+    monkeypatch.setenv("STATIC_PRICE_MAX_AGE_DAYS", "0")
+
+    with pytest.raises(ValueError, match="STATIC_PRICE_MAX_AGE_DAYS must be greater than 0"):
+        create_train_data_provider()
 
 
 def test_provider_returns_generated_transfer_candidates() -> None:

@@ -36,6 +36,42 @@ uvicorn app.main:app --reload --port 8000
 
 该接口不是公开稳定 API，失败时 API 会返回受控错误，Mock 数据源不受影响。
 
+### 静态票价库模式
+
+如果已经通过 `backend/scripts/refresh_static_prices.py` 刷新过本地静态票价库，可以使用 `static-price` provider 查询 SQLite 本地数据。
+
+推荐使用 `STATIC_PRICE_DB` 的**绝对路径**，避免从项目根目录和 `backend/` 目录启动时解析到不同数据库文件。
+
+只读本地静态库：
+
+```powershell
+$env:TRAIN_DATA_PROVIDER = "static-price"
+$env:STATIC_PRICE_DB = "D:\AbelTomato_Files\Developer\Projects\HardSeat-Hero\data\static_prices.sqlite3"
+$env:STATIC_PRICE_MODE = "static-only"
+$env:STATIC_PRICE_MAX_AGE_DAYS = "30"
+uvicorn app.main:app --reload --port 8000
+```
+
+本地未命中或过期时远程补洞并写回静态库：
+
+```powershell
+$env:TRAIN_DATA_PROVIDER = "static-price"
+$env:STATIC_PRICE_DB = "D:\AbelTomato_Files\Developer\Projects\HardSeat-Hero\data\static_prices.sqlite3"
+$env:STATIC_PRICE_MODE = "static-with-remote-fallback"
+$env:STATIC_PRICE_FALLBACK_PROVIDER = "12306-public-price"
+$env:STATIC_PRICE_MAX_AGE_DAYS = "30"
+uvicorn app.main:app --reload --port 8000
+```
+
+注意：`static-with-remote-fallback` 会在查询缺失或过期 OD 时访问 12306 公布票价接口，可能变慢、失败或被限流。该模式只保证公布票价查询，不保证实时有票。
+
+手动刷新静态库示例：
+
+```powershell
+cd backend
+python scripts/refresh_static_prices.py --date 2026-07-01 --od-file ../data/seed_od.csv --db ../data/static_prices.sqlite3 --interval-seconds 1
+```
+
 健康检查：`http://localhost:8000/api/health`
 
 方案查询：`POST http://localhost:8000/api/routes/search`
