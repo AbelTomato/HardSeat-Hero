@@ -40,7 +40,7 @@ class RouteQuery(BaseModel):
     date: date
     max_transfers: int = Field(default=1, ge=0, le=2)
     min_transfer_minutes: int = Field(default=30, ge=0, le=360)
-    max_total_duration_minutes: int = Field(default=24 * 60, ge=60)
+    max_total_duration_minutes: int = Field(default=48 * 60, ge=60)
 
 
 class TransferPlan(BaseModel):
@@ -60,3 +60,11 @@ class RouteSearchResponse(BaseModel):
 
 class StationSearchResponse(BaseModel):
     stations: list[str]
+
+
+class StationMetadata(BaseModel):
+    name: str
+    telecode: str
+    latitude: float
+    longitude: float
+    centrality_score: float = Field(default=0, ge=0)
