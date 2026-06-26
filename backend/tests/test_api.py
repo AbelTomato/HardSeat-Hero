@@ -36,3 +36,14 @@ def test_station_search_api() -> None:
 
     assert response.status_code == 200
     assert "南京南" in response.json()["stations"]
+
+
+def test_provider_status_exposes_transfer_diagnostics() -> None:
+    response = client.get("/api/providers/status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["provider"] == "mock"
+    assert body["transfer_candidate_enabled"] is False
+    assert body["max_remote_queries"] > 0
+    assert body["max_concurrent_remote_queries"] > 0
