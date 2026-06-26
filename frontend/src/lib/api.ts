@@ -40,6 +40,16 @@ export interface StationSearchResponse {
   stations: string[];
 }
 
+export interface ProviderStatusResponse {
+  provider: string;
+  status: string;
+  transfer_candidate_enabled: boolean;
+  max_remote_queries: number;
+  max_concurrent_remote_queries: number;
+  last_remote_query_count: number;
+  updated_at: string;
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -85,6 +95,63 @@ export async function searchRoutes(
   return response.json();
 }
 
+export async function searchRoutesStream(
+  payload: RouteSearchRequest,
+  onPlan: (plan: TransferPlan, response: RouteSearchResponse) => void,
+  signal?: AbortSignal,
+): Promise<RouteSearchResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/routes/search/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal,
+  });
+
+  if (!response.ok) {
+    throw await buildApiError(response, "查询失败");
+  }
+  if (!response.body) {
+    throw new ApiError("浏览器不支持流式读取响应。", null, "unknown");
+  }
+
+  const result: RouteSearchResponse = {
+    query_id: `${payload.date}:${payload.from_station}:${payload.to_station}`,
+    source: "stream",
+    updated_at: new Date().toISOString(),
+    plans: [],
+  };
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += value;
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      consumePlanLine(line, result, onPlan);
+    }
+  }
+  if (buffer.trim()) {
+    consumePlanLine(buffer, result, onPlan);
+  }
+
+  return result;
+}
+
+export async function getProviderStatus(): Promise<ProviderStatusResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/providers/status`);
+
+  if (!response.ok) {
+    throw await buildApiError(response, "数据源状态查询失败");
+  }
+
+  return response.json();
+}
+
 async function buildApiError(
   response: Response,
   fallbackMessage: string,
@@ -113,6 +180,38 @@ async function buildApiError(
     response.status,
     "unknown",
   );
+}
+
+function consumePlanLine(
+  line: string,
+  result: RouteSearchResponse,
+  onPlan: (plan: TransferPlan, response: RouteSearchResponse) => void,
+) {
+  if (!line.trim()) {
+    return;
+  }
+  const parsed = JSON.parse(line) as TransferPlan | { error?: string };
+  if ("error" in parsed && parsed.error) {
+    throw new ApiError(parsed.error, 502, "data_source_unavailable");
+  }
+  const plan = parsed as TransferPlan;
+  result.plans = [...result.plans, plan]
+    .sort((left, right) => comparePlans(left, right))
+    .slice(0, 20);
+  onPlan(plan, { ...result, plans: result.plans });
+}
+
+function comparePlans(left: TransferPlan, right: TransferPlan) {
+  const priceDiff = Number(left.total_price) - Number(right.total_price);
+  if (priceDiff !== 0) {
+    return priceDiff;
+  }
+  const durationDiff =
+    left.total_duration_minutes - right.total_duration_minutes;
+  if (durationDiff !== 0) {
+    return durationDiff;
+  }
+  return left.transfer_stations.length - right.transfer_stations.length;
 }
 
 async function readErrorDetail(response: Response): Promise<string | null> {

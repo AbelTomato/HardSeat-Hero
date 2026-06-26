@@ -1,11 +1,20 @@
-import { FormEvent, ReactNode, useEffect, useState } from "react";
-import { ArrowRight, Clock, Loader2, Search, TrainFront } from "lucide-react";
+import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
+import {
+  ArrowRight,
+  Clock,
+  Loader2,
+  Search,
+  Square,
+  TrainFront,
+} from "lucide-react";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
 import {
   ApiError,
+  ProviderStatusResponse,
   RouteSearchResponse,
-  searchRoutes,
+  getProviderStatus,
+  searchRoutesStream,
   searchStations,
 } from "./lib/api";
 
@@ -19,8 +28,33 @@ export function App() {
   const [fromStationOptions, setFromStationOptions] = useState<string[]>([]);
   const [toStationOptions, setToStationOptions] = useState<string[]>([]);
   const [result, setResult] = useState<RouteSearchResponse | null>(null);
+  const [providerStatus, setProviderStatus] =
+    useState<ProviderStatusResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    let ignore = false;
+
+    async function loadProviderStatus() {
+      try {
+        const status = await getProviderStatus();
+        if (!ignore) {
+          setProviderStatus(status);
+        }
+      } catch {
+        if (!ignore) {
+          setProviderStatus(null);
+        }
+      }
+    }
+
+    loadProviderStatus();
+    return () => {
+      ignore = true;
+    };
+  }, []);
 
   useEffect(() => {
     let ignore = false;
@@ -68,23 +102,43 @@ export function App() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    abortControllerRef.current?.abort();
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
     setIsLoading(true);
     setError(null);
+    setResult(null);
 
     try {
-      const response = await searchRoutes({
-        from_station: fromStation,
-        to_station: toStation,
-        date,
-        max_transfers: 1,
-        min_transfer_minutes: minTransferMinutes,
-      });
+      const response = await searchRoutesStream(
+        {
+          from_station: fromStation,
+          to_station: toStation,
+          date,
+          max_transfers: 1,
+          min_transfer_minutes: minTransferMinutes,
+        },
+        (_, partialResponse) => setResult(partialResponse),
+        abortController.signal,
+      );
       setResult(response);
+      setProviderStatus(await getProviderStatus());
     } catch (caught) {
-      setError(formatSearchError(caught));
+      if (!isAbortError(caught)) {
+        setError(formatSearchError(caught));
+      }
     } finally {
+      if (abortControllerRef.current === abortController) {
+        abortControllerRef.current = null;
+      }
       setIsLoading(false);
     }
+  }
+
+  function handleAbortSearch() {
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    setIsLoading(false);
   }
 
   return (
@@ -101,9 +155,25 @@ export function App() {
             </h1>
           </div>
           <div className="text-sm text-zinc-500">
-            数据源：{result?.source ?? "mock"}
+            数据源：{providerStatus?.provider ?? result?.source ?? "mock"}
           </div>
         </header>
+
+        <section className="rounded-lg border border-zinc-200 bg-white p-3 text-sm text-zinc-600 shadow-sm">
+          <div>
+            中转候选算法：
+            {providerStatus?.transfer_candidate_enabled
+              ? "已启用真实数据源候选站生成"
+              : "未启用真实数据源候选站生成（当前为 Mock 或状态未知）"}
+          </div>
+          <div>
+            OD 请求预算：{providerStatus?.max_remote_queries ?? "-"}
+            ；并发上限：
+            {providerStatus?.max_concurrent_remote_queries ?? "-"}
+            ；上次实际请求：
+            {providerStatus?.last_remote_query_count ?? "-"}
+          </div>
+        </section>
 
         <section className="rounded-lg border border-zinc-200 bg-white p-4 shadow-sm">
           <form
@@ -160,6 +230,12 @@ export function App() {
               )}
               查询
             </Button>
+            {isLoading ? (
+              <Button type="button" onClick={handleAbortSearch}>
+                <Square className="h-4 w-4" />
+                中断
+              </Button>
+            ) : null}
           </form>
         </section>
 
@@ -282,4 +358,8 @@ function formatSearchError(caught: unknown) {
     return "后端服务不可用，请确认 API 服务已启动。";
   }
   return caught instanceof Error ? caught.message : "查询失败";
+}
+
+function isAbortError(caught: unknown) {
+  return caught instanceof DOMException && caught.name === "AbortError";
 }
