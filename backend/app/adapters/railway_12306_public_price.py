@@ -7,9 +7,10 @@ from typing import Any, Protocol
 
 import httpx
 
-from app.adapters.base import TrainDataProvider
+from app.adapters.base import TrainDataProvider, TrainDataProviderError
 from app.domain.models import RouteQuery, SeatPrice, TrainSegment
 from app.services.cache import TtlCache
+from app.services.transfer_candidates import CandidateTransferStationGenerator
 
 
 BASE_URL = "https://kyfw.12306.cn"
@@ -31,13 +32,25 @@ PRICE_FIELDS = {
 }
 
 
-class Railway12306Error(RuntimeError):
+class Railway12306Error(TrainDataProviderError):
     pass
+
+
+def describe_httpx_error(exc: httpx.HTTPError) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        response = exc.response
+        return f"{type(exc).__name__}: HTTP {response.status_code} {response.reason_phrase}"
+    if isinstance(exc, httpx.TimeoutException):
+        return f"{type(exc).__name__}: 请求超时"
+    if isinstance(exc, httpx.RequestError):
+        request = exc.request
+        return f"{type(exc).__name__}: {request.method} {request.url} 请求失败：{exc}"
+    return f"{type(exc).__name__}: {exc}"
 
 
 class PublicPriceQueryClient(Protocol):
     async def query(self, from_station: str, to_station: str, query: RouteQuery) -> list[dict[str, Any]]:
-        pass
+        ...
 
 
 def parse_station_codes(text: str) -> dict[str, str]:
@@ -132,7 +145,11 @@ class StationCodeRepository:
                     return station_codes
                 except (httpx.HTTPError, Railway12306Error) as exc:
                     last_error = exc
-        raise Railway12306Error(f"无法获取车站电报码：{last_error}")
+        if isinstance(last_error, httpx.HTTPError):
+            detail = describe_httpx_error(last_error)
+        else:
+            detail = f"{type(last_error).__name__}: {last_error}"
+        raise Railway12306Error(f"无法获取车站电报码：{detail}")
 
     async def search_stations(self, keyword: str) -> list[str]:
         stations = sorted((await self.get_station_codes()).keys())
@@ -166,7 +183,7 @@ class PublicPriceClient:
                 response = await client.get(PUBLIC_PRICE_URL, params=params)
                 response.raise_for_status()
             except httpx.HTTPError as exc:
-                raise Railway12306Error(f"票价接口请求失败：{exc}") from exc
+                raise Railway12306Error(f"票价接口请求失败：{describe_httpx_error(exc)}") from exc
 
         try:
             payload = response.json()
@@ -183,10 +200,15 @@ class PublicPriceClient:
 class Railway12306PublicPriceProvider(TrainDataProvider):
     name = "12306-public-price"
 
-    def __init__(self, client: PublicPriceQueryClient | None = None) -> None:
+    def __init__(
+        self,
+        client: PublicPriceQueryClient | None = None,
+        transfer_generator: CandidateTransferStationGenerator | None = None,
+    ) -> None:
         station_repository = StationCodeRepository()
         self.client = client or PublicPriceClient(station_repository)
         self.station_repository = station_repository
+        self.transfer_generator = transfer_generator or CandidateTransferStationGenerator()
 
     async def search_segments(
         self,
@@ -200,7 +222,7 @@ class Railway12306PublicPriceProvider(TrainDataProvider):
         return [segment for segment in segments if segment is not None]
 
     def candidate_transfer_stations(self, query: RouteQuery) -> list[str]:
-        return []
+        return self.transfer_generator.generate(query)
 
     async def search_stations(self, keyword: str) -> list[str]:
         return await self.station_repository.search_stations(keyword)

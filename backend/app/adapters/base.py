@@ -3,6 +3,10 @@ from abc import ABC, abstractmethod
 from app.domain.models import RouteQuery, TrainSegment
 
 
+class TrainDataProviderError(RuntimeError):
+    pass
+
+
 class TrainDataProvider(ABC):
     name: str
 

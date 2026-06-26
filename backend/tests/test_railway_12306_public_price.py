@@ -2,17 +2,20 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
+import httpx
 
 from app.adapters.provider_factory import create_train_data_provider
 from app.adapters.railway_12306_public_price import (
     Railway12306Error,
     Railway12306PublicPriceProvider,
     build_segment_from_public_price,
+    describe_httpx_error,
     parse_duration_minutes,
     parse_price,
     parse_station_codes,
 )
 from app.domain.models import RouteQuery
+from app.services.transfer_candidates import CandidateTransferStationGenerator, StationMetadataRepository
 
 
 def public_price_row(**overrides):
@@ -64,6 +67,21 @@ def test_parse_price(raw, expected) -> None:
 
 def test_parse_duration_minutes() -> None:
     assert parse_duration_minutes("05:53") == 353
+
+
+def test_describe_httpx_error_includes_status_code() -> None:
+    request = httpx.Request("GET", "https://kyfw.12306.cn/test")
+    response = httpx.Response(302, request=request, headers={"location": "/login"})
+    error = httpx.HTTPStatusError("redirect", request=request, response=response)
+
+    assert describe_httpx_error(error) == "HTTPStatusError: HTTP 302 Found"
+
+
+def test_describe_httpx_error_includes_request_context() -> None:
+    request = httpx.Request("GET", "https://kyfw.12306.cn/test")
+    error = httpx.ConnectError("connection refused", request=request)
+
+    assert describe_httpx_error(error) == "ConnectError: GET https://kyfw.12306.cn/test 请求失败：connection refused"
 
 
 def test_build_segment_from_public_price_maps_high_speed_fields() -> None:
@@ -162,3 +180,18 @@ def test_provider_factory_supports_12306(monkeypatch) -> None:
     provider = create_train_data_provider()
 
     assert provider.name == "12306-public-price"
+
+
+def test_provider_returns_generated_transfer_candidates() -> None:
+    provider = Railway12306PublicPriceProvider(
+        client=FakePublicPriceClient(),
+        transfer_generator=CandidateTransferStationGenerator(StationMetadataRepository()),
+    )
+    query = RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1))
+
+    candidates = provider.candidate_transfer_stations(query)
+
+    assert candidates
+    assert "南京南" in candidates
+    assert "北京" not in candidates
+    assert "上海" not in candidates
