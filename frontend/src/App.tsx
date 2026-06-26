@@ -173,6 +173,30 @@ export function App() {
             ；上次实际请求：
             {providerStatus?.last_remote_query_count ?? "-"}
           </div>
+          <div>
+            缓存命中：内存{" "}
+            {providerStatus?.last_diagnostics.memory_cache_hit_count ?? "-"}
+            ；SQLite{" "}
+            {providerStatus?.last_diagnostics.persistent_cache_hit_count ?? "-"}
+            ；价格剪枝{" "}
+            {providerStatus?.last_diagnostics.pruned_by_best_price_count ?? "-"}
+            ；Pareto 剪枝{" "}
+            {providerStatus?.last_diagnostics.pruned_by_pareto_count ?? "-"}
+          </div>
+          <div>
+            已扩展候选：
+            {formatStationList(
+              providerStatus?.last_diagnostics.expanded_candidates,
+            )}
+          </div>
+          {providerStatus?.last_diagnostics.failed_candidates.length ? (
+            <div>
+              失败候选：
+              {formatStationList(
+                providerStatus.last_diagnostics.failed_candidates,
+              )}
+            </div>
+          ) : null}
         </section>
 
         <section className="rounded-lg border border-zinc-200 bg-white p-4 shadow-sm">
@@ -272,7 +296,9 @@ export function App() {
                         ? `经 ${plan.transfer_stations.join("、")}`
                         : "直达"}
                     </span>
-                    <span>换乘等待 {plan.transfer_minutes} 分钟</span>
+                    <span>
+                      换乘等待 {formatDuration(plan.transfer_minutes)}
+                    </span>
                   </div>
                 </div>
                 <div className="text-sm text-zinc-500">
@@ -281,29 +307,36 @@ export function App() {
               </div>
 
               <div className="mt-4 grid gap-2">
-                {plan.segments.map((segment) => (
-                  <div
-                    key={`${segment.train_no}-${segment.depart_at}`}
-                    className="grid gap-3 rounded-md bg-zinc-50 p-3 md:grid-cols-[120px_1fr_auto] md:items-center"
-                  >
-                    <div className="font-medium">{segment.train_no}</div>
-                    <div className="flex items-center gap-2 text-sm">
-                      <span>{segment.from_station}</span>
-                      <span className="text-zinc-400">
-                        {formatTime(segment.depart_at)}
-                      </span>
-                      <ArrowRight className="h-4 w-4 text-zinc-400" />
-                      <span>{segment.to_station}</span>
-                      <span className="text-zinc-400">
-                        {formatTime(segment.arrive_at)}
-                      </span>
+                {plan.segments.map((segment) => {
+                  const lowestPrice = lowestSeatPrice(segment);
+                  const baseTime =
+                    plan.segments[0]?.depart_at ?? segment.depart_at;
+
+                  return (
+                    <div
+                      key={`${segment.train_no}-${segment.depart_at}`}
+                      className="grid gap-3 rounded-md bg-zinc-50 p-3 md:grid-cols-[120px_1fr_auto] md:items-center"
+                    >
+                      <div className="font-medium">{segment.train_no}</div>
+                      <div className="flex items-center gap-2 text-sm">
+                        <span>{segment.from_station}</span>
+                        <span className="text-zinc-400">
+                          {formatTimeWithDayOffset(segment.depart_at, baseTime)}
+                        </span>
+                        <ArrowRight className="h-4 w-4 text-zinc-400" />
+                        <span>{segment.to_station}</span>
+                        <span className="text-zinc-400">
+                          {formatTimeWithDayOffset(segment.arrive_at, baseTime)}
+                        </span>
+                      </div>
+                      <div className="text-sm text-zinc-600">
+                        {lowestPrice
+                          ? `${lowestPrice.seat_type} ¥${Number(lowestPrice.price).toFixed(1)}`
+                          : "暂无票价"}
+                      </div>
                     </div>
-                    <div className="text-sm text-zinc-600">
-                      {segment.prices[0]?.seat_type} ¥
-                      {Number(segment.prices[0]?.price ?? 0).toFixed(1)}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </article>
           ))}
@@ -334,6 +367,37 @@ function formatTime(value: string) {
   }).format(new Date(value));
 }
 
+function formatTimeWithDayOffset(value: string, baseValue: string) {
+  const valueDate = new Date(value);
+  const baseDate = new Date(baseValue);
+  const dayOffset = calendarDayOffset(valueDate, baseDate);
+
+  if (dayOffset === 0) {
+    return formatTime(value);
+  }
+  if (dayOffset === 1) {
+    return `次日 ${formatTime(value)}`;
+  }
+  return `${formatMonthDay(valueDate)} ${formatTime(value)}`;
+}
+
+function calendarDayOffset(value: Date, base: Date) {
+  const valueDay = new Date(
+    value.getFullYear(),
+    value.getMonth(),
+    value.getDate(),
+  );
+  const baseDay = new Date(base.getFullYear(), base.getMonth(), base.getDate());
+  return Math.round((valueDay.getTime() - baseDay.getTime()) / 86_400_000);
+}
+
+function formatMonthDay(value: Date) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+  }).format(value);
+}
+
 function formatDateTime(value: string) {
   return new Intl.DateTimeFormat("zh-CN", {
     month: "2-digit",
@@ -342,6 +406,24 @@ function formatDateTime(value: string) {
     minute: "2-digit",
     hour12: false,
   }).format(new Date(value));
+}
+
+function formatStationList(stations: string[] | undefined) {
+  if (!stations || stations.length === 0) {
+    return "-";
+  }
+  return stations.slice(0, 8).join("、") + (stations.length > 8 ? " 等" : "");
+}
+
+function lowestSeatPrice(segment: {
+  prices: Array<{ seat_type: string; price: string }>;
+}) {
+  if (segment.prices.length === 0) {
+    return null;
+  }
+  return segment.prices.reduce((lowest, current) =>
+    Number(current.price) < Number(lowest.price) ? current : lowest,
+  );
 }
 
 function formatSearchError(caught: unknown) {

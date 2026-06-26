@@ -47,7 +47,18 @@ export interface ProviderStatusResponse {
   max_remote_queries: number;
   max_concurrent_remote_queries: number;
   last_remote_query_count: number;
+  last_diagnostics: SearchDiagnostics;
   updated_at: string;
+}
+
+export interface SearchDiagnostics {
+  remote_query_count: number;
+  memory_cache_hit_count: number;
+  persistent_cache_hit_count: number;
+  expanded_candidates: string[];
+  failed_candidates: string[];
+  pruned_by_best_price_count: number;
+  pruned_by_pareto_count: number;
 }
 
 export class ApiError extends Error {
