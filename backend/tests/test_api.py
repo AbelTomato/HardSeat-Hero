@@ -47,3 +47,25 @@ def test_provider_status_exposes_transfer_diagnostics() -> None:
     assert body["transfer_candidate_enabled"] is False
     assert body["max_remote_queries"] > 0
     assert body["max_concurrent_remote_queries"] > 0
+    assert body["last_diagnostics"]["remote_query_count"] >= 0
+    assert isinstance(body["last_diagnostics"]["expanded_candidates"], list)
+
+
+def test_provider_status_exposes_last_search_diagnostics() -> None:
+    client.post(
+        "/api/routes/search",
+        json={
+            "from_station": "北京",
+            "to_station": "上海",
+            "date": "2026-07-01",
+            "max_transfers": 1,
+            "min_transfer_minutes": 30,
+        },
+    )
+
+    response = client.get("/api/providers/status")
+
+    assert response.status_code == 200
+    diagnostics = response.json()["last_diagnostics"]
+    assert diagnostics["remote_query_count"] + diagnostics["memory_cache_hit_count"] >= 1
+    assert "南京南" in diagnostics["expanded_candidates"]

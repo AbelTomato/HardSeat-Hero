@@ -6,7 +6,7 @@ import pytest
 
 from app.adapters.base import TrainDataProvider, TrainDataProviderError
 from app.adapters.mock_provider import MockTrainDataProvider
-from app.domain.models import RouteQuery, SeatPrice, TrainSegment
+from app.domain.models import RouteQuery, SeatPrice, TrainSegment, TransferPlan
 from app.services.cache import SqliteOdCache
 from app.services.route_search import (
     ParetoFrontier,
@@ -15,6 +15,7 @@ from app.services.route_search import (
     deserialize_train_segments,
     serialize_train_segments,
 )
+from app.services.search_telemetry import SqliteSearchTelemetryRecorder
 
 
 class CountingMockTrainDataProvider(MockTrainDataProvider):
@@ -145,6 +146,85 @@ class NonDominatedArrivalProvider(TrainDataProvider):
         return []
 
 
+class CandidateOrderProvider(TrainDataProvider):
+    name = "candidate-order"
+
+    def __init__(self, candidates: list[str]) -> None:
+        self.candidates = candidates
+
+    def candidate_transfer_stations(self, query: RouteQuery) -> list[str]:
+        return self.candidates
+
+    async def search_segments(self, from_station: str, to_station: str, query: RouteQuery) -> list[TrainSegment]:
+        return []
+
+
+class MultipleSeatPriceProvider(TrainDataProvider):
+    name = "multiple-seat-price"
+
+    def candidate_transfer_stations(self, query: RouteQuery) -> list[str]:
+        return []
+
+    async def search_segments(self, from_station: str, to_station: str, query: RouteQuery) -> list[TrainSegment]:
+        return [
+            TrainSegment(
+                train_no="D1",
+                from_station=from_station,
+                to_station=to_station,
+                depart_at=datetime.combine(query.date, time(8, 0), tzinfo=timezone.utc),
+                arrive_at=datetime.combine(query.date, time(9, 0), tzinfo=timezone.utc),
+                duration_minutes=60,
+                prices=[
+                    SeatPrice(seat_type="一等座", price=Decimal("89"), remaining="有票"),
+                    SeatPrice(seat_type="二等座", price=Decimal("56"), remaining="有票"),
+                ],
+                source=self.name,
+                updated_at=datetime.now(timezone.utc),
+            )
+        ]
+
+
+class ManyDirectPlansProvider(TrainDataProvider):
+    name = "many-direct-plans"
+
+    def candidate_transfer_stations(self, query: RouteQuery) -> list[str]:
+        return []
+
+    async def search_segments(self, from_station: str, to_station: str, query: RouteQuery) -> list[TrainSegment]:
+        return [
+            priced_segment(
+                f"D{index}",
+                from_station,
+                to_station,
+                query.date,
+                time(6 + index, 0),
+                time(7 + index, 0),
+                str(index + 1),
+            )
+            for index in range(12)
+        ]
+
+
+class EqualPriceComfortProvider(TrainDataProvider):
+    name = "equal-price-comfort"
+
+    def candidate_transfer_stations(self, query: RouteQuery) -> list[str]:
+        return ["短等待", "舒适等待", "长等待"]
+
+    async def search_segments(self, from_station: str, to_station: str, query: RouteQuery) -> list[TrainSegment]:
+        if query.date != date(2026, 7, 1):
+            return []
+        segments = {
+            ("起点", "短等待"): [priced_segment("D1", from_station, to_station, query.date, time(8, 0), time(9, 0), "50")],
+            ("短等待", "终点"): [priced_segment("D2", from_station, to_station, query.date, time(9, 20), time(10, 20), "50")],
+            ("起点", "舒适等待"): [priced_segment("D3", from_station, to_station, query.date, time(8, 0), time(9, 0), "50")],
+            ("舒适等待", "终点"): [priced_segment("D4", from_station, to_station, query.date, time(10, 0), time(11, 0), "50")],
+            ("起点", "长等待"): [priced_segment("D5", from_station, to_station, query.date, time(8, 0), time(9, 0), "50")],
+            ("长等待", "终点"): [priced_segment("D6", from_station, to_station, query.date, time(12, 0), time(13, 0), "50")],
+        }
+        return segments.get((from_station, to_station), [])
+
+
 def priced_segment(
     train_no: str,
     from_station: str,
@@ -179,6 +259,45 @@ async def test_search_returns_lowest_price_first() -> None:
     assert response.plans
     assert response.plans[0].total_price <= response.plans[1].total_price
     assert response.plans[0].transfer_stations == ["南京南"]
+
+
+@pytest.mark.asyncio
+async def test_total_price_uses_lowest_seat_price_when_first_price_is_not_lowest() -> None:
+    service = RouteSearchService(MultipleSeatPriceProvider())
+    query = RouteQuery(from_station="起点", to_station="终点", date=date(2026, 7, 1), max_transfers=0)
+
+    response = await service.search(query)
+
+    assert response.plans[0].total_price == Decimal("56")
+    assert response.plans[0].segments[0].prices[0].price == Decimal("89")
+    assert response.plans[0].segments[0].lowest_price == Decimal("56")
+
+
+@pytest.mark.asyncio
+async def test_search_returns_at_most_ten_plans() -> None:
+    service = RouteSearchService(ManyDirectPlansProvider())
+    query = RouteQuery(from_station="起点", to_station="终点", date=date(2026, 7, 1), max_transfers=0)
+
+    response = await service.search(query)
+
+    assert len(response.plans) == 10
+    assert [plan.total_price for plan in response.plans] == [Decimal(str(index)) for index in range(1, 11)]
+
+
+@pytest.mark.asyncio
+async def test_equal_price_transfer_plans_are_sorted_by_wait_comfort() -> None:
+    service = RouteSearchService(EqualPriceComfortProvider())
+    query = RouteQuery(
+        from_station="起点",
+        to_station="终点",
+        date=date(2026, 7, 1),
+        min_transfer_minutes=10,
+    )
+
+    response = await service.search(query)
+
+    assert [plan.transfer_stations for plan in response.plans] == [["舒适等待"], ["长等待"], ["短等待"]]
+    assert [plan.total_price for plan in response.plans] == [Decimal("100"), Decimal("100"), Decimal("100")]
 
 
 @pytest.mark.asyncio
@@ -360,6 +479,72 @@ async def test_search_uses_persistent_segment_cache_across_service_instances(tmp
 
 
 @pytest.mark.asyncio
+async def test_search_records_telemetry_for_best_plan(tmp_path) -> None:
+    telemetry = SqliteSearchTelemetryRecorder(tmp_path / "telemetry.sqlite")
+    service = RouteSearchService(MockTrainDataProvider(), telemetry_recorder=telemetry)
+    query = RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1))
+
+    response = await service.search(query)
+
+    assert response.plans[0].transfer_stations == ["南京南"]
+    assert telemetry.best_transfer_stations("mock", "北京", "上海") == ["南京南"]
+
+
+@pytest.mark.asyncio
+async def test_stream_records_telemetry_for_best_plan(tmp_path) -> None:
+    telemetry = SqliteSearchTelemetryRecorder(tmp_path / "telemetry.sqlite")
+    service = RouteSearchService(MockTrainDataProvider(), telemetry_recorder=telemetry)
+    query = RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1))
+
+    plans = [plan async for plan in service.stream(query)]
+
+    assert plans
+    assert telemetry.best_transfer_stations("mock", "北京", "上海") == ["南京南"]
+
+
+@pytest.mark.asyncio
+async def test_search_telemetry_accumulates_transfer_station_hits(tmp_path) -> None:
+    telemetry = SqliteSearchTelemetryRecorder(tmp_path / "telemetry.sqlite")
+    query = RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1))
+
+    await RouteSearchService(MockTrainDataProvider(), telemetry_recorder=telemetry).search(query)
+    await RouteSearchService(MockTrainDataProvider(), telemetry_recorder=telemetry).search(query)
+
+    assert telemetry.best_transfer_stations("mock", "北京", "上海", limit=1) == ["南京南"]
+
+
+def test_a_star_ranked_candidates_merges_telemetry_station_not_in_provider(tmp_path) -> None:
+    telemetry = SqliteSearchTelemetryRecorder(tmp_path / "telemetry.sqlite")
+    provider = CandidateOrderProvider(["静态一", "静态二"])
+    query = RouteQuery(from_station="起点", to_station="终点", date=date(2026, 7, 1), max_transfers=2)
+    telemetry.record_search(
+        query=query,
+        provider=provider.name,
+        plans=[telemetry_plan("历史站", "10")],
+        remote_query_count=1,
+    )
+    service = RouteSearchService(provider, telemetry_recorder=telemetry)
+
+    candidates = service.cheapest_path_searcher._ranked_transfer_candidates(query)
+
+    assert candidates == ["历史站", "静态一", "静态二"]
+
+
+def test_a_star_ranked_candidates_prefers_higher_telemetry_hit_count(tmp_path) -> None:
+    telemetry = SqliteSearchTelemetryRecorder(tmp_path / "telemetry.sqlite")
+    provider = CandidateOrderProvider(["低命中", "高命中"])
+    query = RouteQuery(from_station="起点", to_station="终点", date=date(2026, 7, 1), max_transfers=2)
+    telemetry.record_search(query, provider.name, [telemetry_plan("低命中", "1")], remote_query_count=1)
+    telemetry.record_search(query, provider.name, [telemetry_plan("高命中", "200")], remote_query_count=1)
+    telemetry.record_search(query, provider.name, [telemetry_plan("高命中", "200")], remote_query_count=1)
+    service = RouteSearchService(provider, telemetry_recorder=telemetry)
+
+    candidates = service.cheapest_path_searcher._ranked_transfer_candidates(query)
+
+    assert candidates[:2] == ["高命中", "低命中"]
+
+
+@pytest.mark.asyncio
 async def test_search_stops_requesting_segments_after_budget_exhausted() -> None:
     provider = CountingMockTrainDataProvider()
     service = RouteSearchService(provider, max_remote_queries=1)
@@ -384,4 +569,14 @@ def path_state(station: str, price: Decimal, arrive_at: datetime) -> PathSearchS
         accumulated_price=price,
         arrive_at=arrive_at,
         visited_stations=frozenset({"起点", station}),
+    )
+
+
+def telemetry_plan(transfer_station: str, total_price: str) -> TransferPlan:
+    return TransferPlan(
+        total_price=Decimal(total_price),
+        total_duration_minutes=1,
+        transfer_minutes=0,
+        transfer_stations=[transfer_station],
+        segments=[],
     )

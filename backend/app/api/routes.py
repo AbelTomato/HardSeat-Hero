@@ -40,6 +40,7 @@ async def provider_status() -> dict[str, object]:
         "max_remote_queries": route_search_service.max_remote_queries,
         "max_concurrent_remote_queries": route_search_service.max_concurrent_remote_queries,
         "last_remote_query_count": route_search_service.remote_query_count,
+        "last_diagnostics": route_search_service.last_diagnostics.as_dict(),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 

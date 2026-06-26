@@ -4,7 +4,7 @@ import json
 import os
 from bisect import bisect_left
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -12,6 +12,34 @@ from pathlib import Path
 from app.adapters.base import TrainDataProvider, TrainDataProviderError
 from app.domain.models import RouteQuery, RouteSearchResponse, TrainSegment, TransferPlan
 from app.services.cache import SqliteOdCache, TtlCache
+from app.services.search_telemetry import SqliteSearchTelemetryRecorder
+
+
+MAX_RETURNED_PLANS = 10
+COMFORTABLE_MIN_TRANSFER_MINUTES = 30
+COMFORTABLE_MAX_TRANSFER_MINUTES = 120
+
+
+@dataclass
+class SearchDiagnostics:
+    remote_query_count: int = 0
+    memory_cache_hit_count: int = 0
+    persistent_cache_hit_count: int = 0
+    expanded_candidates: list[str] = field(default_factory=list)
+    failed_candidates: list[str] = field(default_factory=list)
+    pruned_by_best_price_count: int = 0
+    pruned_by_pareto_count: int = 0
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "remote_query_count": self.remote_query_count,
+            "memory_cache_hit_count": self.memory_cache_hit_count,
+            "persistent_cache_hit_count": self.persistent_cache_hit_count,
+            "expanded_candidates": self.expanded_candidates,
+            "failed_candidates": self.failed_candidates,
+            "pruned_by_best_price_count": self.pruned_by_best_price_count,
+            "pruned_by_pareto_count": self.pruned_by_pareto_count,
+        }
 
 
 class BestPriceTracker:
@@ -76,11 +104,7 @@ class CheapestPathSearcher:
         self.route_search = route_search
 
     async def search(self, query: RouteQuery) -> list[TransferPlan]:
-        candidates = [
-            station
-            for station in self.route_search.provider.candidate_transfer_stations(query)
-            if station not in {query.from_station, query.to_station}
-        ]
+        candidates = self._ranked_transfer_candidates(query)
         best_price: Decimal | None = None
         plans: list[TransferPlan] = []
         queue: list[tuple[Decimal, int, PathSearchState]] = []
@@ -94,20 +118,23 @@ class CheapestPathSearcher:
         )
         heapq.heappush(queue, (Decimal("0"), counter, initial_state))
         frontier = ParetoFrontier()
-        while queue and len(plans) < 20:
+        while queue:
             priority, _, state = heapq.heappop(queue)
-            if best_price is not None and priority >= best_price:
+            if best_price is not None and priority > best_price:
                 break
 
             for next_station in self._next_stations(state, query, candidates):
+                self.route_search._record_expanded_candidate(next_station)
                 try:
                     segments = await self._candidate_segments(state, next_station, query)
                 except TrainDataProviderError:
+                    self.route_search._record_failed_candidate(next_station)
                     continue
 
                 for segment in segments:
                     next_price = state.accumulated_price + (segment.lowest_price or Decimal("0"))
-                    if best_price is not None and next_price >= best_price:
+                    if best_price is not None and next_price > best_price:
+                        self.route_search.last_diagnostics.pruned_by_best_price_count += 1
                         continue
                     next_segments = (*state.segments, segment)
                     if next_station == query.to_station:
@@ -127,18 +154,56 @@ class CheapestPathSearcher:
                     if next_state.transfer_count > query.max_transfers:
                         continue
                     if not frontier.add_if_not_dominated(next_state):
+                        self.route_search.last_diagnostics.pruned_by_pareto_count += 1
                         continue
                     counter += 1
                     heapq.heappush(queue, (next_price + self._heuristic_lower_bound(next_station, query.to_station), counter, next_state))
 
-        plans.sort(key=lambda plan: (plan.total_price, plan.total_duration_minutes, len(plan.transfer_stations)))
-        return plans[:20]
+        plans.sort(key=self.route_search._plan_sort_key)
+        return plans[:MAX_RETURNED_PLANS]
 
     def _next_stations(self, state: PathSearchState, query: RouteQuery, candidates: list[str]) -> list[str]:
         stations = [query.to_station]
         if state.transfer_count < query.max_transfers:
             stations.extend(station for station in candidates if station not in state.visited_stations)
         return stations
+
+    def _ranked_transfer_candidates(self, query: RouteQuery) -> list[str]:
+        blocked_stations = {query.from_station, query.to_station}
+        provider_candidates = [
+            station
+            for station in self.route_search.provider.candidate_transfer_stations(query)
+            if station not in blocked_stations
+        ]
+        provider_order = {station: index for index, station in enumerate(provider_candidates)}
+        telemetry_hits = []
+        if self.route_search.telemetry_recorder is not None:
+            telemetry_hits = [
+                hit
+                for hit in self.route_search.telemetry_recorder.transfer_station_hits(
+                    self.route_search.provider.name,
+                    query.from_station,
+                    query.to_station,
+                )
+                if hit.station not in blocked_stations
+            ]
+        hit_by_station = {hit.station: hit for hit in telemetry_hits}
+        candidates = list(dict.fromkeys([*(hit.station for hit in telemetry_hits), *provider_candidates]))
+
+        def sort_key(station: str) -> tuple[int, int, Decimal, int, str]:
+            hit = hit_by_station.get(station)
+            if hit is None:
+                return (1, 0, Decimal("Infinity"), provider_order.get(station, len(provider_order)), station)
+            return (
+                0,
+                -hit.hit_count,
+                hit.best_price if hit.best_price is not None else Decimal("Infinity"),
+                provider_order.get(station, len(provider_order)),
+                station,
+            )
+
+        candidates.sort(key=sort_key)
+        return candidates
 
     async def _candidate_segments(
         self,
@@ -173,6 +238,7 @@ class RouteSearchService:
         max_concurrent_remote_queries: int = 5,
         remote_query_interval_seconds: float | None = None,
         persistent_cache: SqliteOdCache[list[TrainSegment]] | None = None,
+        telemetry_recorder: SqliteSearchTelemetryRecorder | None = None,
     ) -> None:
         self.provider = provider
         self.segment_cache: TtlCache[list[TrainSegment]] = TtlCache(cache_ttl_seconds)
@@ -185,28 +251,39 @@ class RouteSearchService:
             remote_query_interval_seconds if remote_query_interval_seconds is not None else self._default_remote_query_interval()
         )
         self.cheapest_path_searcher = CheapestPathSearcher(self)
+        self.telemetry_recorder = telemetry_recorder or self._default_telemetry_recorder()
         self.remote_query_count = 0
+        self.last_diagnostics = SearchDiagnostics()
 
     async def search(self, query: RouteQuery) -> RouteSearchResponse:
-        self.remote_query_count = 0
+        self._reset_search_state()
         plans = [plan async for plan in self._iter_plans(query)]
-        plans.sort(key=lambda plan: (plan.total_price, plan.total_duration_minutes, len(plan.transfer_stations)))
+        plans = self._deduplicate_plans(plans)
+        plans.sort(key=self._plan_sort_key)
+        plans = plans[:MAX_RETURNED_PLANS]
+        self._record_search(query, plans)
 
         return RouteSearchResponse(
             query_id=f"{query.date.isoformat()}:{query.from_station}:{query.to_station}",
             source=self.provider.name,
             updated_at=datetime.now(timezone.utc),
-            plans=plans[:20],
+            plans=plans,
         )
 
     async def stream(self, query: RouteQuery) -> AsyncIterator[TransferPlan]:
-        self.remote_query_count = 0
+        self._reset_search_state()
         emitted: list[TransferPlan] = []
+        emitted_keys: set[tuple[tuple[str, str, str, datetime, datetime], ...]] = set()
         async for plan in self._iter_plans(query):
+            plan_key = self._plan_identity_key(plan)
+            if plan_key in emitted_keys:
+                continue
+            emitted_keys.add(plan_key)
             emitted.append(plan)
-            emitted.sort(key=lambda item: (item.total_price, item.total_duration_minutes, len(item.transfer_stations)))
-            if plan in emitted[:20]:
+            emitted.sort(key=self._plan_sort_key)
+            if plan in emitted[:MAX_RETURNED_PLANS]:
                 yield plan
+        self._record_search(query, emitted[:MAX_RETURNED_PLANS])
 
     async def _iter_plans(self, query: RouteQuery) -> AsyncIterator[TransferPlan]:
         if query.max_transfers >= 2:
@@ -237,11 +314,13 @@ class RouteSearchService:
         cache_key = self._segment_cache_key(from_station, to_station, query)
         cached_segments = self.segment_cache.get(cache_key)
         if cached_segments is not None:
+            self.last_diagnostics.memory_cache_hit_count += 1
             return cached_segments
 
         if self.persistent_segment_cache is not None:
             persisted_segments = self.persistent_segment_cache.get(cache_key)
             if persisted_segments is not None:
+                self.last_diagnostics.persistent_cache_hit_count += 1
                 self.segment_cache.set(cache_key, persisted_segments)
                 return persisted_segments
 
@@ -251,6 +330,7 @@ class RouteSearchService:
 
             should_wait = self.remote_query_interval_seconds > 0 and self.remote_query_count > 0
             self.remote_query_count += 1
+            self.last_diagnostics.remote_query_count = self.remote_query_count
 
         if should_wait:
             await asyncio.sleep(self.remote_query_interval_seconds)
@@ -281,6 +361,7 @@ class RouteSearchService:
         transfer_station: str,
         best_price: BestPriceTracker,
     ) -> list[TransferPlan]:
+        self._record_expanded_candidate(transfer_station)
         first_legs = await self._search_transfer_window_segments(
             query.from_station,
             transfer_station,
@@ -294,6 +375,8 @@ class RouteSearchService:
         current_best_price = await best_price.get()
         first_legs = self._segments_that_can_improve_best_price(first_legs, current_best_price)
         if not first_legs:
+            if current_best_price is not None:
+                self.last_diagnostics.pruned_by_best_price_count += 1
             return []
 
         second_legs = await self._search_transfer_window_segments(
@@ -310,7 +393,8 @@ class RouteSearchService:
         second_departures = [segment.depart_at for segment in second_legs]
         for first in first_legs:
             current_best_price = await best_price.get()
-            if first.lowest_price is not None and current_best_price is not None and first.lowest_price >= current_best_price:
+            if first.lowest_price is not None and current_best_price is not None and first.lowest_price > current_best_price:
+                self.last_diagnostics.pruned_by_best_price_count += 1
                 continue
             earliest_departure = first.arrive_at + timedelta(minutes=query.min_transfer_minutes)
             start_index = bisect_left(second_departures, earliest_departure)
@@ -318,7 +402,8 @@ class RouteSearchService:
                 plan = self._build_plan([first, second])
                 if plan.total_duration_minutes <= query.max_total_duration_minutes:
                     current_best_price = await best_price.get()
-                    if current_best_price is not None and plan.total_price >= current_best_price:
+                    if current_best_price is not None and plan.total_price > current_best_price:
+                        self.last_diagnostics.pruned_by_best_price_count += 1
                         continue
                     await best_price.update(plan.total_price)
                     plans.append(plan)
@@ -356,7 +441,48 @@ class RouteSearchService:
     ) -> list[TrainSegment]:
         if best_price is None:
             return segments
-        return [segment for segment in segments if segment.lowest_price is not None and segment.lowest_price < best_price]
+        return [segment for segment in segments if segment.lowest_price is not None and segment.lowest_price <= best_price]
+
+    def _plan_sort_key(self, plan: TransferPlan) -> tuple[Decimal, int, int, int]:
+        return (
+            plan.total_price,
+            self._transfer_wait_comfort_penalty(plan),
+            len(plan.transfer_stations),
+            plan.total_duration_minutes,
+        )
+
+    def _deduplicate_plans(self, plans: list[TransferPlan]) -> list[TransferPlan]:
+        unique_plans: list[TransferPlan] = []
+        seen: set[tuple[tuple[str, str, str, datetime, datetime], ...]] = set()
+        for plan in plans:
+            plan_key = self._plan_identity_key(plan)
+            if plan_key in seen:
+                continue
+            seen.add(plan_key)
+            unique_plans.append(plan)
+        return unique_plans
+
+    def _plan_identity_key(self, plan: TransferPlan) -> tuple[tuple[str, str, str, datetime, datetime], ...]:
+        return tuple(
+            (
+                segment.train_no,
+                segment.from_station,
+                segment.to_station,
+                segment.depart_at,
+                segment.arrive_at,
+            )
+            for segment in plan.segments
+        )
+
+    def _transfer_wait_comfort_penalty(self, plan: TransferPlan) -> int:
+        penalty = 0
+        for previous, current in zip(plan.segments, plan.segments[1:]):
+            wait_minutes = max(0, int((current.depart_at - previous.arrive_at).total_seconds() // 60))
+            if wait_minutes < COMFORTABLE_MIN_TRANSFER_MINUTES:
+                penalty += (COMFORTABLE_MIN_TRANSFER_MINUTES - wait_minutes) * 10
+            elif wait_minutes > COMFORTABLE_MAX_TRANSFER_MINUTES:
+                penalty += wait_minutes - COMFORTABLE_MAX_TRANSFER_MINUTES
+        return penalty
 
     def _build_plan(self, segments: list[TrainSegment]) -> TransferPlan:
         total_price = sum([segment.lowest_price or Decimal("0") for segment in segments], Decimal("0"))
@@ -397,6 +523,34 @@ class RouteSearchService:
             serializer=serialize_train_segments,
             deserializer=deserialize_train_segments,
         )
+
+    def _default_telemetry_recorder(self) -> SqliteSearchTelemetryRecorder | None:
+        telemetry_path = os.getenv("SEARCH_TELEMETRY_DB", "").strip()
+        if not telemetry_path:
+            return None
+        return SqliteSearchTelemetryRecorder(Path(telemetry_path))
+
+    def _record_search(self, query: RouteQuery, plans: list[TransferPlan]) -> None:
+        if self.telemetry_recorder is None:
+            return
+        self.telemetry_recorder.record_search(
+            query=query,
+            provider=self.provider.name,
+            plans=plans,
+            remote_query_count=self.remote_query_count,
+        )
+
+    def _reset_search_state(self) -> None:
+        self.remote_query_count = 0
+        self.last_diagnostics = SearchDiagnostics()
+
+    def _record_expanded_candidate(self, station: str) -> None:
+        if station not in self.last_diagnostics.expanded_candidates:
+            self.last_diagnostics.expanded_candidates.append(station)
+
+    def _record_failed_candidate(self, station: str) -> None:
+        if station not in self.last_diagnostics.failed_candidates:
+            self.last_diagnostics.failed_candidates.append(station)
 
 
 def serialize_train_segments(segments: list[TrainSegment]) -> str:
