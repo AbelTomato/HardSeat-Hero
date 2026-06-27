@@ -50,6 +50,18 @@ def test_read_od_csv_supports_origin_destination_columns(tmp_path) -> None:
     assert pairs == [OdPair(origin="北京", destination="上海")]
 
 
+def test_read_od_csv_ignores_priority_and_reason_columns(tmp_path) -> None:
+    od_file = tmp_path / "refresh_od.csv"
+    od_file.write_text(
+        "origin,destination,priority,reason\n北京,上海,20,popular_search\n",
+        encoding="utf-8",
+    )
+
+    pairs = read_od_csv(od_file)
+
+    assert pairs == [OdPair(origin="北京", destination="上海")]
+
+
 @pytest.mark.asyncio
 async def test_refresh_static_prices_writes_segments_and_crawl_records(tmp_path) -> None:
     repository = SQLiteStaticPriceRepository(tmp_path / "static_prices.sqlite3")
