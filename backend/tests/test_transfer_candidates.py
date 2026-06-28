@@ -1,10 +1,12 @@
 from datetime import date
+from pathlib import Path
 
 from app.domain.models import RouteQuery, StationMetadata
 from app.services.transfer_candidates import (
     CandidateTransferConfig,
     CandidateTransferStationGenerator,
     StationMetadataRepository,
+    load_station_metadata,
 )
 
 
@@ -87,6 +89,30 @@ def test_default_candidates_include_normal_train_transfer_hubs() -> None:
     assert "徐州" in candidates
     assert "南京" in candidates
     assert "南京南" in candidates
+
+
+def test_station_metadata_repository_loads_csv(tmp_path: Path) -> None:
+    csv_path = tmp_path / "station_metadata.csv"
+    csv_path.write_text(
+        "name,telecode,latitude,longitude,centrality_score\n"
+        "北京,BJP,39.90151,116.478602,80\n"
+        "上海,SHH,31.249,121.455,90\n",
+        encoding="utf-8",
+    )
+
+    stations = load_station_metadata(csv_path)
+
+    assert [station.name for station in stations] == ["北京", "上海"]
+    assert stations[0].telecode == "BJP"
+    assert stations[0].latitude == 39.90151
+    assert stations[0].longitude == 116.478602
+
+
+def test_station_metadata_repository_falls_back_when_csv_missing(tmp_path: Path) -> None:
+    stations = load_station_metadata(tmp_path / "missing.csv")
+
+    assert any(station.name == "北京" for station in stations)
+    assert any(station.name == "上海" for station in stations)
 
 
 def test_candidate_generator_filters_endpoint_neighbor_stations() -> None:

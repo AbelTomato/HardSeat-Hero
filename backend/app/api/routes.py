@@ -1,11 +1,16 @@
 import json
 from datetime import datetime, timezone
+from time import perf_counter
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
+from app.adapters.base import (
+    TrainDataBadRequestError,
+    TrainDataConfigurationError,
+    TrainDataProviderError,
+)
 from app.adapters.provider_factory import create_train_data_provider
-from app.adapters.railway_12306_public_price import Railway12306Error
 from app.domain.models import RouteQuery, RouteSearchResponse, StationSearchResponse
 from app.services.route_search import RouteSearchService
 
@@ -25,10 +30,14 @@ async def search_stations(q: str = "") -> StationSearchResponse:
     search = getattr(provider, "search_stations", None)
     if search is None:
         return StationSearchResponse(stations=[])
-    stations = search(q)
-    if hasattr(stations, "__await__"):
-        stations = await stations
-    return StationSearchResponse(stations=stations)
+
+    try:        # 防止search(q)抛异常直接冒泡到500 Interval Server Error
+        stations = search(q)
+        if hasattr(stations, "__await__"):
+            stations = await stations
+        return StationSearchResponse(stations=stations)
+    except TrainDataProviderError as exc:
+        raise HTTPException(status_code=provider_error_status_code(exc), detail=str(exc)) from exc
 
 
 @router.get("/providers/status")
@@ -49,17 +58,42 @@ async def provider_status() -> dict[str, object]:
 async def search_routes(query: RouteQuery) -> RouteSearchResponse:
     try:
         return await route_search_service.search(query)
-    except Railway12306Error as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except TrainDataProviderError as exc:
+        raise HTTPException(status_code=provider_error_status_code(exc), detail=str(exc)) from exc
 
 
 @router.post("/routes/search/stream")
 async def stream_routes(query: RouteQuery) -> StreamingResponse:
     async def generate():
+        started_at = perf_counter()
         try:
-            async for plan in route_search_service.stream(query):
-                yield plan.model_dump_json() + "\n"
-        except Railway12306Error as exc:
+            async for snapshot in route_search_service.stream_snapshots(query):
+                payload = {
+                    **snapshot,
+                    "elapsed_ms": max(0, round((perf_counter() - started_at) * 1000)),
+                    "plans": [plan.model_dump(mode="json") for plan in snapshot["plans"]],
+                    "updated_at": snapshot["updated_at"].isoformat(),
+                }
+                yield json.dumps(payload, ensure_ascii=False) + "\n"
+            yield json.dumps(
+                {
+                    "type": "metadata",
+                    "query_id": f"{query.date.isoformat()}:{query.from_station}:{query.to_station}",
+                    "source": route_search_service.provider.name,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "elapsed_ms": max(0, round((perf_counter() - started_at) * 1000)),
+                },
+                ensure_ascii=False,
+            ) + "\n"
+        except TrainDataProviderError as exc:
             yield json.dumps({"error": str(exc)}, ensure_ascii=False) + "\n"
 
     return StreamingResponse(generate(), media_type="application/x-ndjson")
+
+
+def provider_error_status_code(exc: TrainDataProviderError) -> int:
+    if isinstance(exc, TrainDataBadRequestError):
+        return 400
+    if isinstance(exc, TrainDataConfigurationError):
+        return 503
+    return 502

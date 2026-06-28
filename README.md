@@ -42,9 +42,9 @@ uvicorn app.main:app --reload --port 8000
 ### 可选缓存和遥测
 
 ```powershell
-$env:ROUTE_SEGMENT_CACHE_DB = "D:\AbelTomato_Files\Developer\Projects\HardSeat-Hero\data\route_segment_cache.sqlite3"
+$env:ROUTE_SEGMENT_CACHE_DB = "D:\path\to\HardSeat-Hero\data\route_segment_cache.sqlite3"
 $env:ROUTE_SEGMENT_CACHE_TTL_SECONDS = "3600"
-$env:SEARCH_TELEMETRY_DB = "D:\AbelTomato_Files\Developer\Projects\HardSeat-Hero\data\search_telemetry.sqlite3"
+$env:SEARCH_TELEMETRY_DB = "D:\path\to\HardSeat-Hero\data\search_telemetry.sqlite3"
 ```
 
 这些 SQLite 文件属于本地运行时数据，已在 `.gitignore` 中忽略。
@@ -53,13 +53,15 @@ $env:SEARCH_TELEMETRY_DB = "D:\AbelTomato_Files\Developer\Projects\HardSeat-Hero
 
 如果已经通过 `backend/scripts/refresh_static_prices.py` 刷新过本地静态票价库，可以使用 `static-price` provider 查询 SQLite 本地数据。
 
+静态票价库文件（例如 `data/static_prices.sqlite3`）属于本地运行时数据，不应提交到 Git。仓库只跟踪 `data/seed_od.csv` 这类种子输入；首次使用静态库模式前，需要按下方“手动刷新静态库示例”在本机生成或更新 SQLite 文件。
+
 推荐使用 `STATIC_PRICE_DB` 的**绝对路径**，避免从项目根目录和 `backend/` 目录启动时解析到不同数据库文件。
 
 只读本地静态库：
 
 ```powershell
 $env:TRAIN_DATA_PROVIDER = "static-price"
-$env:STATIC_PRICE_DB = "D:\AbelTomato_Files\Developer\Projects\HardSeat-Hero\data\static_prices.sqlite3"
+$env:STATIC_PRICE_DB = "D:\path\to\HardSeat-Hero\data\static_prices.sqlite3"
 $env:STATIC_PRICE_MODE = "static-only"
 $env:STATIC_PRICE_MAX_AGE_DAYS = "30"
 uvicorn app.main:app --reload --port 8000
@@ -69,7 +71,7 @@ uvicorn app.main:app --reload --port 8000
 
 ```powershell
 $env:TRAIN_DATA_PROVIDER = "static-price"
-$env:STATIC_PRICE_DB = "D:\AbelTomato_Files\Developer\Projects\HardSeat-Hero\data\static_prices.sqlite3"
+$env:STATIC_PRICE_DB = "D:\path\to\HardSeat-Hero\data\static_prices.sqlite3"
 $env:STATIC_PRICE_MODE = "static-with-remote-fallback"
 $env:STATIC_PRICE_FALLBACK_PROVIDER = "12306-public-price"
 $env:STATIC_PRICE_MAX_AGE_DAYS = "30"
@@ -108,7 +110,7 @@ python scripts/export_refresh_od_from_telemetry.py --telemetry-db ../data/search
 
 健康检查：`http://localhost:8000/api/health`
 
-方案查询：`POST http://localhost:8000/api/routes/search`
+方案查询：`POST http://localhost:8000/api/routes/search`，响应包含后端搜索耗时字段 `elapsed_ms`（毫秒）。
 
 ## 前端启动
 

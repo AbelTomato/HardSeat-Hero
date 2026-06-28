@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
 from math import asin, cos, radians, sin, sqrt
+from pathlib import Path
 
 from app.domain.models import RouteQuery, StationMetadata
 
 
 EARTH_RADIUS_KM = 6371.0088
+STATION_METADATA_CSV = Path(__file__).resolve().parents[1] / "data" / "station_metadata.csv"
 
 
 @dataclass(frozen=True)
@@ -89,13 +92,51 @@ CHEAP_TRANSFER_SCORES = {
 
 class StationMetadataRepository:
     def __init__(self, stations: list[StationMetadata] | None = None) -> None:
-        self._stations = stations or default_station_metadata()
+        self._stations = stations or load_station_metadata()
 
     def get(self, name: str) -> StationMetadata | None:
         return next((station for station in self._stations if station.name == name), None)
 
     def all(self) -> list[StationMetadata]:
         return list(self._stations)
+
+
+def load_station_metadata(path: Path = STATION_METADATA_CSV) -> list[StationMetadata]:
+    if not path.exists():
+        return default_station_metadata()
+
+    stations: list[StationMetadata] = []
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as file:
+            reader = csv.DictReader(file)
+            for row in reader:
+                name = (row.get("name") or "").strip()
+                latitude = parse_optional_float(row.get("latitude"))
+                longitude = parse_optional_float(row.get("longitude"))
+                if not name or latitude is None or longitude is None:
+                    continue
+                stations.append(
+                    StationMetadata(
+                        name=name,
+                        telecode=(row.get("telecode") or "").strip(),
+                        latitude=latitude,
+                        longitude=longitude,
+                        centrality_score=parse_optional_float(row.get("centrality_score")) or 0,
+                    )
+                )
+    except (OSError, ValueError):
+        return default_station_metadata()
+
+    return dedupe_station_metadata(stations) or default_station_metadata()
+
+
+def parse_optional_float(value: str | None) -> float | None:
+    if value is None or value.strip() == "":
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
 
 
 class CandidateTransferStationGenerator:

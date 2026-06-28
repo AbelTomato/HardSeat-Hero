@@ -11,6 +11,8 @@ dist/
 .env
 .env.local
 
+.vscode/
+
 # Runtime-generated local data. Keep data/seed_od.csv tracked.
 data/*.sqlite3
 data/*.db

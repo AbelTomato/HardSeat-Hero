@@ -118,7 +118,7 @@ export function App() {
           max_transfers: 1,
           min_transfer_minutes: minTransferMinutes,
         },
-        (_, partialResponse) => setResult(partialResponse),
+        (partialResponse) => setResult(partialResponse),
         abortController.signal,
       );
       setResult(response);
@@ -172,6 +172,16 @@ export function App() {
             {providerStatus?.max_concurrent_remote_queries ?? "-"}
             ；上次实际请求：
             {providerStatus?.last_remote_query_count ?? "-"}
+            ；查询耗时：
+            {result?.elapsed_ms !== undefined
+              ? formatElapsedTime(result.elapsed_ms)
+              : "-"}
+          </div>
+          <div>
+            实时快照：已搜索候选 {result?.searched_count ?? "-"}
+            ；待完成 {result?.pending_count ?? "-"}
+            ；当前展示已发现最低价 Top {result?.plans.length ?? 0}
+            {isLoading ? "（搜索推进时会自动刷新并移除被挤出的方案）" : ""}
           </div>
           <div>
             缓存命中：内存{" "}
@@ -357,6 +367,13 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 function formatDuration(minutes: number) {
   return `${Math.floor(minutes / 60)}小时${minutes % 60}分钟`;
+}
+
+function formatElapsedTime(milliseconds: number) {
+  if (milliseconds < 1000) {
+    return `${milliseconds} ms`;
+  }
+  return `${(milliseconds / 1000).toFixed(2)} 秒`;
 }
 
 function formatTime(value: string) {

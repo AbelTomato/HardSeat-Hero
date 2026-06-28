@@ -7,6 +7,18 @@ class TrainDataProviderError(RuntimeError):
     pass
 
 
+class TrainDataUnavailableError(TrainDataProviderError):
+    pass
+
+
+class TrainDataConfigurationError(TrainDataProviderError):
+    pass
+
+
+class TrainDataBadRequestError(TrainDataProviderError):
+    pass
+
+
 class TrainDataProvider(ABC):
     name: str
 

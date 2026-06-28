@@ -33,7 +33,33 @@ export interface RouteSearchResponse {
   query_id: string;
   source: string;
   updated_at: string;
+  elapsed_ms?: number;
+  searched_count?: number;
+  pending_count?: number;
+  remote_query_count?: number;
+  final?: boolean;
   plans: TransferPlan[];
+}
+
+interface RouteSearchSnapshot {
+  type: "snapshot";
+  query_id: string;
+  source: string;
+  updated_at: string;
+  elapsed_ms?: number;
+  searched_count: number;
+  pending_count: number;
+  remote_query_count: number;
+  final?: boolean;
+  plans: TransferPlan[];
+}
+
+interface RouteSearchMetadata {
+  type: "metadata";
+  query_id: string;
+  source: string;
+  updated_at: string;
+  elapsed_ms: number;
 }
 
 export interface StationSearchResponse {
@@ -108,7 +134,7 @@ export async function searchRoutes(
 
 export async function searchRoutesStream(
   payload: RouteSearchRequest,
-  onPlan: (plan: TransferPlan, response: RouteSearchResponse) => void,
+  onUpdate: (response: RouteSearchResponse) => void,
   signal?: AbortSignal,
 ): Promise<RouteSearchResponse> {
   const response = await fetch(`${API_BASE_URL}/api/routes/search/stream`, {
@@ -143,11 +169,11 @@ export async function searchRoutesStream(
     const lines = buffer.split("\n");
     buffer = lines.pop() ?? "";
     for (const line of lines) {
-      consumePlanLine(line, result, onPlan);
+      consumeStreamLine(line, result, onUpdate);
     }
   }
   if (buffer.trim()) {
-    consumePlanLine(buffer, result, onPlan);
+    consumeStreamLine(buffer, result, onUpdate);
   }
 
   return result;
@@ -193,23 +219,47 @@ async function buildApiError(
   );
 }
 
-function consumePlanLine(
+function consumeStreamLine(
   line: string,
   result: RouteSearchResponse,
-  onPlan: (plan: TransferPlan, response: RouteSearchResponse) => void,
+  onUpdate: (response: RouteSearchResponse) => void,
 ) {
   if (!line.trim()) {
     return;
   }
-  const parsed = JSON.parse(line) as TransferPlan | { error?: string };
+  const parsed = JSON.parse(line) as
+    | TransferPlan
+    | RouteSearchSnapshot
+    | RouteSearchMetadata
+    | { error?: string };
   if ("error" in parsed && parsed.error) {
     throw new ApiError(parsed.error, 502, "data_source_unavailable");
+  }
+  if ("type" in parsed && parsed.type === "snapshot") {
+    result.query_id = parsed.query_id;
+    result.source = parsed.source;
+    result.updated_at = parsed.updated_at;
+    result.elapsed_ms = parsed.elapsed_ms;
+    result.searched_count = parsed.searched_count;
+    result.pending_count = parsed.pending_count;
+    result.remote_query_count = parsed.remote_query_count;
+    result.final = parsed.final;
+    result.plans = parsed.plans;
+    onUpdate({ ...result, plans: result.plans });
+    return;
+  }
+  if ("type" in parsed && parsed.type === "metadata") {
+    result.query_id = parsed.query_id;
+    result.source = parsed.source;
+    result.updated_at = parsed.updated_at;
+    result.elapsed_ms = parsed.elapsed_ms;
+    return;
   }
   const plan = parsed as TransferPlan;
   result.plans = [...result.plans, plan]
     .sort((left, right) => comparePlans(left, right))
     .slice(0, 20);
-  onPlan(plan, { ...result, plans: result.plans });
+  onUpdate({ ...result, plans: result.plans });
 }
 
 function comparePlans(left: TransferPlan, right: TransferPlan) {

@@ -129,7 +129,7 @@ class SqliteSearchTelemetryRecorder:
                     destination TEXT NOT NULL,
                     max_transfers INTEGER NOT NULL,
                     min_transfer_minutes INTEGER NOT NULL,
-                    max_total_duration_minutes INTEGER NOT NULL,
+                    max_total_duration_minutes INTEGER,
                     plan_count INTEGER NOT NULL,
                     best_price TEXT,
                     best_transfer_stations_json TEXT NOT NULL,
@@ -137,6 +137,7 @@ class SqliteSearchTelemetryRecorder:
                 )
                 """
             )
+            self._migrate_nullable_max_total_duration(connection)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS transfer_station_hits(
@@ -151,3 +152,45 @@ class SqliteSearchTelemetryRecorder:
                 )
                 """
             )
+
+    def _migrate_nullable_max_total_duration(self, connection: sqlite3.Connection) -> None:
+        table_info = connection.execute("PRAGMA table_info(search_runs)").fetchall()
+        max_duration_column = next((column for column in table_info if column[1] == "max_total_duration_minutes"), None)
+        if max_duration_column is None or max_duration_column[3] == 0:
+            return
+
+        connection.execute("ALTER TABLE search_runs RENAME TO search_runs_legacy")
+        connection.execute(
+            """
+            CREATE TABLE search_runs(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                searched_at TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                travel_date TEXT NOT NULL,
+                origin TEXT NOT NULL,
+                destination TEXT NOT NULL,
+                max_transfers INTEGER NOT NULL,
+                min_transfer_minutes INTEGER NOT NULL,
+                max_total_duration_minutes INTEGER,
+                plan_count INTEGER NOT NULL,
+                best_price TEXT,
+                best_transfer_stations_json TEXT NOT NULL,
+                remote_query_count INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO search_runs(
+                id, searched_at, provider, travel_date, origin, destination,
+                max_transfers, min_transfer_minutes, max_total_duration_minutes,
+                plan_count, best_price, best_transfer_stations_json, remote_query_count
+            )
+            SELECT
+                id, searched_at, provider, travel_date, origin, destination,
+                max_transfers, min_transfer_minutes, max_total_duration_minutes,
+                plan_count, best_price, best_transfer_stations_json, remote_query_count
+            FROM search_runs_legacy
+            """
+        )
+        connection.execute("DROP TABLE search_runs_legacy")

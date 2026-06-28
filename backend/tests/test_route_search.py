@@ -1,5 +1,5 @@
 import asyncio
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -58,6 +58,21 @@ class SlowEmptyTransferProvider(TrainDataProvider):
         self.max_active_queries = max(self.max_active_queries, self.active_queries)
         await asyncio.sleep(0.01)
         self.active_queries -= 1
+        return []
+
+
+class SlowBudgetProvider(TrainDataProvider):
+    name = "slow-budget"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, date]] = []
+
+    def candidate_transfer_stations(self, query: RouteQuery) -> list[str]:
+        return ["中转站"]
+
+    async def search_segments(self, from_station: str, to_station: str, query: RouteQuery) -> list[TrainSegment]:
+        self.calls.append((from_station, to_station, query.date))
+        await asyncio.sleep(0.01)
         return []
 
 
@@ -159,6 +174,27 @@ class CandidateOrderProvider(TrainDataProvider):
         return []
 
 
+class ProgressiveCheaperTransferProvider(TrainDataProvider):
+    name = "progressive-cheaper-transfer"
+
+    def candidate_transfer_stations(self, query: RouteQuery) -> list[str]:
+        return ["较贵中转", "便宜中转"]
+
+    async def search_segments(self, from_station: str, to_station: str, query: RouteQuery) -> list[TrainSegment]:
+        if "较贵中转" in {from_station, to_station}:
+            await asyncio.sleep(0.01)
+        if "便宜中转" in {from_station, to_station}:
+            await asyncio.sleep(0.02)
+        segments = {
+            ("起点", "终点"): [priced_segment("D0", from_station, to_station, query.date, time(8, 0), time(12, 0), "300")],
+            ("起点", "较贵中转"): [priced_segment("D1", from_station, to_station, query.date, time(8, 0), time(9, 0), "80")],
+            ("较贵中转", "终点"): [priced_segment("D2", from_station, to_station, query.date, time(10, 0), time(11, 0), "80")],
+            ("起点", "便宜中转"): [priced_segment("D3", from_station, to_station, query.date, time(8, 0), time(9, 0), "50")],
+            ("便宜中转", "终点"): [priced_segment("D4", from_station, to_station, query.date, time(10, 0), time(11, 0), "50")],
+        }
+        return segments.get((from_station, to_station), [])
+
+
 class MultipleSeatPriceProvider(TrainDataProvider):
     name = "multiple-seat-price"
 
@@ -202,6 +238,30 @@ class ManyDirectPlansProvider(TrainDataProvider):
                 str(index + 1),
             )
             for index in range(12)
+        ]
+
+
+class LongDurationDirectProvider(TrainDataProvider):
+    name = "long-duration-direct"
+
+    def candidate_transfer_stations(self, query: RouteQuery) -> list[str]:
+        return []
+
+    async def search_segments(self, from_station: str, to_station: str, query: RouteQuery) -> list[TrainSegment]:
+        depart_at = datetime.combine(query.date, time(8, 0), tzinfo=timezone.utc)
+        arrive_at = depart_at + timedelta(days=4)
+        return [
+            TrainSegment(
+                train_no="K1",
+                from_station=from_station,
+                to_station=to_station,
+                depart_at=depart_at,
+                arrive_at=arrive_at,
+                duration_minutes=int((arrive_at - depart_at).total_seconds() // 60),
+                prices=[SeatPrice(seat_type="硬座", price=Decimal("100"), remaining="有票")],
+                source=self.name,
+                updated_at=datetime.now(timezone.utc),
+            )
         ]
 
 
@@ -250,6 +310,22 @@ def priced_segment(
 
 
 @pytest.mark.asyncio
+async def test_stream_snapshots_replace_previous_top_plans() -> None:
+    service = RouteSearchService(ProgressiveCheaperTransferProvider(), remote_query_interval_seconds=0)
+    query = RouteQuery(from_station="起点", to_station="终点", date=date(2026, 7, 1))
+
+    snapshots = [snapshot async for snapshot in service.stream_snapshots(query)]
+
+    assert len(snapshots) >= 2
+    assert all(snapshot["type"] == "snapshot" for snapshot in snapshots)
+    assert snapshots[0]["plans"][0].total_price == Decimal("300")
+    assert snapshots[-1]["plans"][0].total_price == Decimal("100")
+    assert snapshots[-1]["plans"][0].transfer_stations == ["便宜中转"]
+    assert snapshots[-1]["final"] is True
+    assert snapshots[-1]["pending_count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_search_returns_lowest_price_first() -> None:
     service = RouteSearchService(MockTrainDataProvider())
     query = RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1))
@@ -282,6 +358,33 @@ async def test_search_returns_at_most_ten_plans() -> None:
 
     assert len(response.plans) == 10
     assert [plan.total_price for plan in response.plans] == [Decimal(str(index)) for index in range(1, 11)]
+
+
+@pytest.mark.asyncio
+async def test_default_search_does_not_filter_by_total_duration() -> None:
+    service = RouteSearchService(LongDurationDirectProvider())
+    query = RouteQuery(from_station="起点", to_station="终点", date=date(2026, 7, 1), max_transfers=0)
+
+    response = await service.search(query)
+
+    assert len(response.plans) == 1
+    assert response.plans[0].total_duration_minutes == 4 * 24 * 60
+
+
+@pytest.mark.asyncio
+async def test_explicit_total_duration_limit_still_filters_plans() -> None:
+    service = RouteSearchService(LongDurationDirectProvider())
+    query = RouteQuery(
+        from_station="起点",
+        to_station="终点",
+        date=date(2026, 7, 1),
+        max_transfers=0,
+        max_total_duration_minutes=72 * 60,
+    )
+
+    response = await service.search(query)
+
+    assert response.plans == []
 
 
 @pytest.mark.asyncio
@@ -556,10 +659,44 @@ async def test_search_stops_requesting_segments_after_budget_exhausted() -> None
     assert service.remote_query_count == 1
 
 
+@pytest.mark.asyncio
+async def test_concurrent_searches_have_independent_remote_query_budget() -> None:
+    provider = SlowBudgetProvider()
+    service = RouteSearchService(provider, max_remote_queries=2, max_concurrent_remote_queries=10)
+    query = RouteQuery(from_station="起点", to_station="终点", date=date(2026, 7, 1), max_transfers=1)
+
+    await asyncio.gather(service.search(query), service.search(query))
+
+    assert len(provider.calls) == 4
+    assert service.remote_query_count == 2
+
+
 def test_route_query_default_allows_long_normal_train_direct_routes() -> None:
     query = RouteQuery(from_station="厦门北", to_station="西安", date=date(2026, 6, 29))
 
-    assert query.max_total_duration_minutes == 48 * 60
+    assert query.max_total_duration_minutes is None
+
+
+def test_route_query_strips_station_names() -> None:
+    query = RouteQuery(from_station=" 北京 ", to_station=" 上海 ", date=date(2026, 7, 1))
+
+    assert query.from_station == "北京"
+    assert query.to_station == "上海"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"from_station": "   ", "to_station": "上海", "date": date(2026, 7, 1)},
+        {"from_station": "北京", "to_station": "\t", "date": date(2026, 7, 1)},
+        {"from_station": "北京", "to_station": "北京", "date": date(2026, 7, 1)},
+        {"from_station": "北" * 65, "to_station": "上海", "date": date(2026, 7, 1)},
+        {"from_station": "北京", "to_station": "上海", "date": date(2026, 7, 1), "max_total_duration_minutes": 59},
+    ],
+)
+def test_route_query_rejects_invalid_station_or_duration(payload) -> None:
+    with pytest.raises(ValueError):
+        RouteQuery(**payload)
 
 
 def path_state(station: str, price: Decimal, arrive_at: datetime) -> PathSearchState:

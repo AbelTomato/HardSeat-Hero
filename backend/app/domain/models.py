@@ -1,7 +1,8 @@
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class SeatPrice(BaseModel):
@@ -35,12 +36,25 @@ class TrainSegment(BaseModel):
 
 
 class RouteQuery(BaseModel):
-    from_station: str = Field(min_length=1)
-    to_station: str = Field(min_length=1)
+    from_station: str = Field(min_length=1, max_length=64)
+    to_station: str = Field(min_length=1, max_length=64)
     date: date
     max_transfers: int = Field(default=1, ge=0, le=2)
     min_transfer_minutes: int = Field(default=30, ge=0, le=360)
-    max_total_duration_minutes: int = Field(default=48 * 60, ge=60)
+    max_total_duration_minutes: int | None = Field(default=None, ge=60)
+
+    @field_validator("from_station", "to_station", mode="before")
+    @classmethod
+    def strip_station_name(cls, value: Any) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @model_validator(mode="after")
+    def validate_distinct_stations(self) -> "RouteQuery":
+        if self.from_station == self.to_station:
+            raise ValueError("from_station and to_station must be different")
+        return self
 
 
 class TransferPlan(BaseModel):
@@ -55,6 +69,7 @@ class RouteSearchResponse(BaseModel):
     query_id: str
     source: str
     updated_at: datetime
+    elapsed_ms: int = Field(ge=0)
     plans: list[TransferPlan]
 
 
