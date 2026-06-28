@@ -318,7 +318,6 @@ export function App() {
 
               <div className="mt-4 grid gap-2">
                 {plan.segments.map((segment) => {
-                  const lowestPrice = lowestSeatPrice(segment);
                   const baseTime =
                     plan.segments[0]?.depart_at ?? segment.depart_at;
 
@@ -339,9 +338,23 @@ export function App() {
                           {formatTimeWithDayOffset(segment.arrive_at, baseTime)}
                         </span>
                       </div>
-                      <div className="text-sm text-zinc-600">
-                        {lowestPrice
-                          ? `${lowestPrice.seat_type} ¥${Number(lowestPrice.price).toFixed(1)}`
+                      <div className="flex flex-wrap gap-1.5 text-sm text-zinc-600 md:justify-end">
+                        {segment.prices.length > 0
+                          ? segment.prices.map((seatPrice) => {
+                              const remaining = formatRemaining(
+                                seatPrice.remaining,
+                              );
+
+                              return (
+                                <span
+                                  key={`${seatPrice.seat_type}-${seatPrice.price}`}
+                                  className="rounded-full border border-zinc-200 bg-white px-2 py-1"
+                                >
+                                  {seatPrice.seat_type} {formatSeatPrice(seatPrice.price)}
+                                  {remaining ? ` · ${remaining}` : ""}
+                                </span>
+                              );
+                            })
                           : "暂无票价"}
                       </div>
                     </div>
@@ -432,15 +445,12 @@ function formatStationList(stations: string[] | undefined) {
   return stations.slice(0, 8).join("、") + (stations.length > 8 ? " 等" : "");
 }
 
-function lowestSeatPrice(segment: {
-  prices: Array<{ seat_type: string; price: string }>;
-}) {
-  if (segment.prices.length === 0) {
-    return null;
-  }
-  return segment.prices.reduce((lowest, current) =>
-    Number(current.price) < Number(lowest.price) ? current : lowest,
-  );
+function formatSeatPrice(price: string) {
+  return `¥${Number(price).toFixed(1)}`;
+}
+
+function formatRemaining(remaining: string) {
+  return remaining && remaining !== "unknown" ? remaining : null;
 }
 
 function formatSearchError(caught: unknown) {
