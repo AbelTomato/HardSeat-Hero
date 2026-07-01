@@ -6,7 +6,6 @@ from app.adapters.base import TrainDataProvider, TrainDataProviderError
 from app.api import routes as api_routes
 from app.domain.models import RouteQuery, TrainSegment
 from app.main import app
-from app.services.route_search import RouteSearchService
 
 
 client = TestClient(app)
@@ -19,6 +18,31 @@ class FailingProvider(TrainDataProvider):
         return []
 
     async def search_segments(self, from_station: str, to_station: str, query: RouteQuery) -> list[TrainSegment]:
+        raise TrainDataProviderError("数据源失败")
+
+
+class FailingRouteSearchEngine:
+    source = "failing"
+    status = {
+        "provider": "failing",
+        "search_engine": "candidate",
+        "transfer_candidate_enabled": False,
+        "max_remote_queries": 0,
+        "max_concurrent_remote_queries": 0,
+        "last_remote_query_count": 0,
+        "last_diagnostics": {
+            "remote_query_count": 0,
+            "memory_cache_hit_count": 0,
+            "expanded_candidates": [],
+        },
+    }
+
+    async def search(self, query: RouteQuery):
+        raise TrainDataProviderError("数据源失败")
+
+    async def stream_snapshots(self, query: RouteQuery):
+        if False:
+            yield {}
         raise TrainDataProviderError("数据源失败")
 
 
@@ -87,12 +111,15 @@ def test_station_search_api() -> None:
     assert "南京南" in response.json()["stations"]
 
 
-def test_provider_status_exposes_transfer_diagnostics() -> None:
+def test_provider_status_exposes_search_engine_state() -> None:
     response = client.get("/api/providers/status")
 
     assert response.status_code == 200
     body = response.json()
     assert body["provider"] == "mock"
+    assert body["search_engine"] == "candidate"
+    assert body["status"] == "ok"
+    assert body["online_remote_io"] is False
     assert body["transfer_candidate_enabled"] is False
     assert body["max_remote_queries"] > 0
     assert body["max_concurrent_remote_queries"] > 0
@@ -121,7 +148,7 @@ def test_provider_status_exposes_last_search_diagnostics() -> None:
 
 
 def test_route_search_maps_provider_error_to_bad_gateway(monkeypatch) -> None:
-    monkeypatch.setattr(api_routes, "route_search_service", RouteSearchService(FailingProvider()))
+    monkeypatch.setattr(api_routes, "route_search_service", FailingRouteSearchEngine())
 
     response = client.post(
         "/api/routes/search",
@@ -139,7 +166,7 @@ def test_route_search_maps_provider_error_to_bad_gateway(monkeypatch) -> None:
 
 
 def test_stream_route_emits_provider_error(monkeypatch) -> None:
-    monkeypatch.setattr(api_routes, "route_search_service", RouteSearchService(FailingProvider()))
+    monkeypatch.setattr(api_routes, "route_search_service", FailingRouteSearchEngine())
 
     response = client.post(
         "/api/routes/search/stream",

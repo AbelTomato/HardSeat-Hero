@@ -7,6 +7,17 @@ export interface RouteSearchRequest {
   date: string;
   max_transfers: number;
   min_transfer_minutes: number;
+  max_total_duration_minutes?: number | null;
+  candidate_limit?: number;
+  candidate_strategy?:
+    | "balanced"
+    | "direct_corridor"
+    | "wide_detour"
+    | "hub_first"
+    | "exhaustive_budgeted";
+  max_detour_ratio?: number | null;
+  max_detour_km?: number | null;
+  corridor_width_km?: number | null;
 }
 
 export interface TrainSegment {

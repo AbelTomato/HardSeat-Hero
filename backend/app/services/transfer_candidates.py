@@ -19,9 +19,10 @@ class CandidateTransferConfig:
     max_corridor_km: float = 300
     corridor_ratio: float = 0.2
     endpoint_exclusion_km: float = 25
+    high_hub_min_centrality: float = 90
 
 
-LOW_PRICE_TRANSFER_HUBS = {
+STRATEGIC_TRANSFER_HUBS = {
     "赣州",
     "龙岩",
     "梅州",
@@ -70,7 +71,7 @@ LOW_PRICE_TRANSFER_HUBS = {
 }
 
 
-CHEAP_TRANSFER_SCORES = {
+TRANSFER_PRIOR_SCORES = {
     "赣州": 100,
     "龙岩": 96,
     "长沙": 94,
@@ -87,6 +88,10 @@ CHEAP_TRANSFER_SCORES = {
     "龙川": 70,
     "惠州": 68,
     "东莞东": 66,
+}
+
+STRATEGIC_CORRIDOR_HUBS_BY_DESTINATION = {
+    "拉萨": {"郑州", "西安", "兰州", "西宁", "格尔木"},
 }
 
 
@@ -151,55 +156,116 @@ class CandidateTransferStationGenerator:
     def generate(self, query: RouteQuery) -> list[str]:
         origin = self.repository.get(query.from_station)
         destination = self.repository.get(query.to_station)
+        max_candidates = query.candidate_limit or self.config.max_candidates
         if origin is None or destination is None:
-            return self._fallback_low_price_hubs(query)
+            return self._fallback_transfer_hubs(query, max_candidates)
 
         ab_distance = haversine_km(origin, destination)
         if ab_distance == 0:
             return []
 
-        corridor_km = max(
-            self.config.min_corridor_km,
-            min(self.config.max_corridor_km, self.config.corridor_ratio * ab_distance),
-        )
-        scored: list[tuple[tuple[float, float, float, str], str]] = []
+        corridor_km = self._corridor_width_km(query, ab_distance)
+        strategic_hubs = self._strategic_corridor_hubs(query)
+        scored: list[tuple[tuple[float, float, float, float, str], str]] = []
         for station in self.repository.all():
             if station.name in {origin.name, destination.name}:
                 continue
             projection, perpendicular = project_station(origin, destination, station)
-            projection_margin_km = ab_distance * 0.25
-            if projection < -projection_margin_km or projection > ab_distance + projection_margin_km:
+            detour_km = max(0, haversine_km(origin, station) + haversine_km(station, destination) - ab_distance)
+            transfer_prior_score = self._transfer_prior_score(station.name)
+            if not self._station_allowed(
+                query,
+                station,
+                ab_distance=ab_distance,
+                corridor_km=corridor_km,
+                projection=projection,
+                perpendicular=perpendicular,
+                detour_km=detour_km,
+                transfer_prior_score=transfer_prior_score,
+                strategic_hubs=strategic_hubs,
+            ):
                 continue
-            if projection < self.config.endpoint_exclusion_km or projection > ab_distance - self.config.endpoint_exclusion_km:
-                continue
-            cheap_transfer_score = self._cheap_transfer_score(station.name)
-            if cheap_transfer_score > 0:
-                max_perpendicular = max(corridor_km, min(500, ab_distance * 0.75))
-                if perpendicular > max_perpendicular:
-                    continue
-            elif perpendicular > corridor_km:
-                continue
-            score = (-cheap_transfer_score, -station.centrality_score, perpendicular, station.name)
+            score = (-transfer_prior_score, -station.centrality_score, detour_km, perpendicular, station.name)
             scored.append((score, station.name))
 
         scored.sort(key=lambda item: item[0])
-        return [name for _, name in scored[: self.config.max_candidates]]
+        return [name for _, name in scored[:max_candidates]]
 
-    def _fallback_low_price_hubs(self, query: RouteQuery) -> list[str]:
+    def _fallback_transfer_hubs(self, query: RouteQuery, max_candidates: int) -> list[str]:
         blocked = {query.from_station, query.to_station}
         hubs = [
             station.name
             for station in self.repository.all()
-            if station.name in LOW_PRICE_TRANSFER_HUBS and station.name not in blocked
+            if station.name in STRATEGIC_TRANSFER_HUBS and station.name not in blocked
         ]
-        return hubs[: self.config.max_candidates]
+        return hubs[:max_candidates]
 
-    def _cheap_transfer_score(self, station_name: str) -> float:
-        if station_name in CHEAP_TRANSFER_SCORES:
-            return CHEAP_TRANSFER_SCORES[station_name]
-        if station_name in LOW_PRICE_TRANSFER_HUBS:
+    def _transfer_prior_score(self, station_name: str) -> float:
+        if station_name in TRANSFER_PRIOR_SCORES:
+            return TRANSFER_PRIOR_SCORES[station_name]
+        if station_name in STRATEGIC_TRANSFER_HUBS:
             return 50
         return 0
+
+    def _corridor_width_km(self, query: RouteQuery, ab_distance: float) -> float:
+        if query.corridor_width_km is not None:
+            return float(query.corridor_width_km)
+        if query.candidate_strategy == "direct_corridor":
+            ratio = min(self.config.corridor_ratio, 0.15)
+        elif query.candidate_strategy == "wide_detour":
+            ratio = max(self.config.corridor_ratio, 0.5)
+        else:
+            ratio = self.config.corridor_ratio
+        return max(self.config.min_corridor_km, min(self.config.max_corridor_km, ratio * ab_distance))
+
+    def _station_allowed(
+        self,
+        query: RouteQuery,
+        station: StationMetadata,
+        *,
+        ab_distance: float,
+        corridor_km: float,
+        projection: float,
+        perpendicular: float,
+        detour_km: float,
+        transfer_prior_score: float,
+        strategic_hubs: set[str],
+    ) -> bool:
+        near_origin = 0 <= projection < self.config.endpoint_exclusion_km
+        near_destination = ab_distance - self.config.endpoint_exclusion_km < projection <= ab_distance
+        if near_origin or near_destination:
+            if station.name not in strategic_hubs:
+                return False
+
+        if station.name in strategic_hubs:
+            return True
+
+        if query.candidate_strategy in {"wide_detour", "exhaustive_budgeted"} and self._within_detour_limit(query, detour_km, ab_distance):
+            return True
+
+        if query.candidate_strategy == "hub_first" and station.centrality_score >= self.config.high_hub_min_centrality:
+            return True
+
+        projection_margin_km = 0 if query.candidate_strategy in {"balanced", "direct_corridor"} else ab_distance * 0.25
+        if projection < -projection_margin_km or projection > ab_distance + projection_margin_km:
+            return False
+
+        if transfer_prior_score > 0 and query.candidate_strategy != "direct_corridor":
+            max_perpendicular = max(corridor_km, min(500, ab_distance * 0.75))
+            return perpendicular <= max_perpendicular
+
+        return perpendicular <= corridor_km
+
+    def _within_detour_limit(self, query: RouteQuery, detour_km: float, ab_distance: float) -> bool:
+        if query.max_detour_km is not None:
+            return detour_km <= query.max_detour_km
+        max_detour_ratio = query.max_detour_ratio
+        if max_detour_ratio is None:
+            max_detour_ratio = 1.0 if query.candidate_strategy == "wide_detour" else 3.0
+        return detour_km <= ab_distance * max_detour_ratio
+
+    def _strategic_corridor_hubs(self, query: RouteQuery) -> set[str]:
+        return STRATEGIC_CORRIDOR_HUBS_BY_DESTINATION.get(query.to_station, set())
 
 
 def project_station(origin: StationMetadata, destination: StationMetadata, station: StationMetadata) -> tuple[float, float]:

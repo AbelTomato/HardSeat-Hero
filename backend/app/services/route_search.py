@@ -190,41 +190,7 @@ class CheapestPathSearcher:
         return stations
 
     def _ranked_transfer_candidates(self, query: RouteQuery) -> list[str]:
-        blocked_stations = {query.from_station, query.to_station}
-        provider_candidates = [
-            station
-            for station in self.route_search.provider.candidate_transfer_stations(query)
-            if station not in blocked_stations
-        ]
-        provider_order = {station: index for index, station in enumerate(provider_candidates)}
-        telemetry_hits = []
-        if self.route_search.telemetry_recorder is not None:
-            telemetry_hits = [
-                hit
-                for hit in self.route_search.telemetry_recorder.transfer_station_hits(
-                    self.route_search.provider.name,
-                    query.from_station,
-                    query.to_station,
-                )
-                if hit.station not in blocked_stations
-            ]
-        hit_by_station = {hit.station: hit for hit in telemetry_hits}
-        candidates = list(dict.fromkeys([*(hit.station for hit in telemetry_hits), *provider_candidates]))
-
-        def sort_key(station: str) -> tuple[int, int, Decimal, int, str]:
-            hit = hit_by_station.get(station)
-            if hit is None:
-                return (1, 0, Decimal("Infinity"), provider_order.get(station, len(provider_order)), station)
-            return (
-                0,
-                -hit.hit_count,
-                hit.best_price if hit.best_price is not None else Decimal("Infinity"),
-                provider_order.get(station, len(provider_order)),
-                station,
-            )
-
-        candidates.sort(key=sort_key)
-        return candidates
+        return self.route_search._ranked_transfer_candidates(query)
 
     async def _candidate_segments(
         self,
@@ -278,6 +244,23 @@ class RouteSearchService:
         self.remote_query_count = 0
         self.last_diagnostics = SearchDiagnostics()
         self._last_diagnostics_lock = asyncio.Lock()
+
+    @property
+    def source(self) -> str:
+        return self.provider.name
+
+    @property
+    def status(self) -> dict[str, object]:
+        return {
+            "provider": self.provider.name,
+            "search_engine": "candidate",
+            "status": "ok",
+            "transfer_candidate_enabled": self.provider.name != "mock",
+            "max_remote_queries": self.max_remote_queries,
+            "max_concurrent_remote_queries": self.max_concurrent_remote_queries,
+            "last_remote_query_count": self.remote_query_count,
+            "last_diagnostics": self.last_diagnostics.as_dict(),
+        }
 
     async def search(self, query: RouteQuery) -> RouteSearchResponse:
         started_at = perf_counter()
@@ -403,7 +386,7 @@ class RouteSearchService:
     ) -> AsyncIterator[TransferPlan]:
         tasks = [
             asyncio.create_task(self._one_transfer_plans_for_station(query, transfer_station, best_price, context))
-            for transfer_station in self.provider.candidate_transfer_stations(query)
+            for transfer_station in self._ranked_transfer_candidates(query)
         ]
         for task in asyncio.as_completed(tasks):
             try:
@@ -412,6 +395,43 @@ class RouteSearchService:
                 continue
             for plan in plans:
                 yield plan
+
+    def _ranked_transfer_candidates(self, query: RouteQuery) -> list[str]:
+        blocked_stations = {query.from_station, query.to_station}
+        provider_candidates = [
+            station
+            for station in self.provider.candidate_transfer_stations(query)
+            if station not in blocked_stations
+        ]
+        provider_order = {station: index for index, station in enumerate(provider_candidates)}
+        telemetry_hits = []
+        if self.telemetry_recorder is not None:
+            telemetry_hits = [
+                hit
+                for hit in self.telemetry_recorder.transfer_station_hits(
+                    self.provider.name,
+                    query.from_station,
+                    query.to_station,
+                )
+                if hit.station not in blocked_stations
+            ]
+        hit_by_station = {hit.station: hit for hit in telemetry_hits}
+        candidates = list(dict.fromkeys([*(hit.station for hit in telemetry_hits), *provider_candidates]))
+
+        def sort_key(station: str) -> tuple[int, int, Decimal, int, str]:
+            hit = hit_by_station.get(station)
+            if hit is None:
+                return (1, 0, Decimal("Infinity"), provider_order.get(station, len(provider_order)), station)
+            return (
+                0,
+                -hit.hit_count,
+                hit.best_price if hit.best_price is not None else Decimal("Infinity"),
+                provider_order.get(station, len(provider_order)),
+                station,
+            )
+
+        candidates.sort(key=sort_key)
+        return candidates
 
     async def _one_transfer_plans_for_station(
         self,

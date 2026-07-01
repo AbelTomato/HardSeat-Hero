@@ -64,7 +64,7 @@ def test_candidate_generator_prioritizes_hub_score_when_spatial_conditions_equal
     assert candidates[:2] == ["HighHub", "LowHub"]
 
 
-def test_candidate_generator_prioritizes_cheap_transfer_score_over_centrality() -> None:
+def test_candidate_generator_prioritizes_transfer_prior_score_over_centrality() -> None:
     generator = CandidateTransferStationGenerator(
         StationMetadataRepository(
             [
@@ -79,6 +79,73 @@ def test_candidate_generator_prioritizes_cheap_transfer_score_over_centrality() 
     candidates = generator.generate(RouteQuery(from_station="A", to_station="B", date=date(2026, 7, 1)))
 
     assert candidates[:2] == ["赣州", "HighHub"]
+
+
+def test_candidate_limit_controls_result_count() -> None:
+    generator = CandidateTransferStationGenerator(
+        StationMetadataRepository(
+            [
+                StationMetadata(name="A", telecode="AAA", latitude=0, longitude=0),
+                StationMetadata(name="B", telecode="BBB", latitude=0, longitude=10),
+                StationMetadata(name="T1", telecode="T01", latitude=0, longitude=3, centrality_score=30),
+                StationMetadata(name="T2", telecode="T02", latitude=0, longitude=4, centrality_score=20),
+                StationMetadata(name="T3", telecode="T03", latitude=0, longitude=5, centrality_score=10),
+            ]
+        )
+    )
+
+    candidates = generator.generate(RouteQuery(from_station="A", to_station="B", date=date(2026, 7, 1), candidate_limit=2))
+
+    assert candidates == ["T1", "T2"]
+
+
+def test_wide_detour_strategy_allows_reasonable_off_corridor_station() -> None:
+    generator = CandidateTransferStationGenerator(
+        StationMetadataRepository(
+            [
+                StationMetadata(name="A", telecode="AAA", latitude=0, longitude=0),
+                StationMetadata(name="B", telecode="BBB", latitude=0, longitude=10),
+                StationMetadata(name="Corridor", telecode="COR", latitude=0, longitude=5, centrality_score=10),
+                StationMetadata(name="Detour", telecode="DET", latitude=3, longitude=5, centrality_score=100),
+            ]
+        ),
+        CandidateTransferConfig(max_candidates=10, min_corridor_km=50, max_corridor_km=50, corridor_ratio=0.01),
+    )
+
+    conservative = generator.generate(RouteQuery(from_station="A", to_station="B", date=date(2026, 7, 1)))
+    wide = generator.generate(
+        RouteQuery(
+            from_station="A",
+            to_station="B",
+            date=date(2026, 7, 1),
+            candidate_strategy="wide_detour",
+            max_detour_ratio=0.2,
+        )
+    )
+
+    assert "Corridor" in conservative
+    assert "Detour" not in conservative
+    assert "Detour" in wide
+
+
+def test_lhasa_query_injects_strategic_corridor_hubs() -> None:
+    generator = CandidateTransferStationGenerator(
+        StationMetadataRepository(
+            [
+                StationMetadata(name="东莞", telecode="RTQ", latitude=23.02, longitude=113.75),
+                StationMetadata(name="拉萨", telecode="LSO", latitude=29.65, longitude=91.10),
+                StationMetadata(name="郑州", telecode="ZZF", latitude=34.75, longitude=113.62, centrality_score=95),
+                StationMetadata(name="西安", telecode="XAY", latitude=34.34, longitude=108.94, centrality_score=95),
+                StationMetadata(name="兰州", telecode="LZJ", latitude=36.06, longitude=103.84, centrality_score=90),
+                StationMetadata(name="西宁", telecode="XNO", latitude=36.62, longitude=101.78, centrality_score=88),
+                StationMetadata(name="格尔木", telecode="GRO", latitude=36.40, longitude=94.90, centrality_score=80),
+            ]
+        )
+    )
+
+    candidates = generator.generate(RouteQuery(from_station="东莞", to_station="拉萨", date=date(2026, 7, 1), candidate_limit=10))
+
+    assert {"郑州", "西安", "兰州", "西宁", "格尔木"}.issubset(candidates)
 
 
 def test_default_candidates_include_normal_train_transfer_hubs() -> None:

@@ -49,6 +49,28 @@ $env:SEARCH_TELEMETRY_DB = "D:\path\to\HardSeat-Hero\data\search_telemetry.sqlit
 
 这些 SQLite 文件属于本地运行时数据，已在 `.gitignore` 中忽略。
 
+### 搜索引擎切换
+
+后端路线搜索通过 `ROUTE_SEARCH_ENGINE` 选择搜索架构。未设置时默认使用旧候选中转站 OD 搜索，保持既有行为。
+
+候选中转站 OD 搜索（默认）：
+
+```powershell
+$env:ROUTE_SEARCH_ENGINE = "candidate"
+uvicorn app.main:app --reload --port 8000
+```
+
+本地时间扩展图搜索：
+
+```powershell
+$env:ROUTE_SEARCH_ENGINE = "time-expanded"
+$env:TIME_EXPANDED_GRAPH_DB = "D:\path\to\HardSeat-Hero\data\static_prices.sqlite3"
+$env:TIME_EXPANDED_GRAPH_PROVIDER = "12306-public-price"
+uvicorn app.main:app --reload --port 8000
+```
+
+`time-expanded` 在线搜索只读本地 SQLite 的时间扩展图快照表，不触发 12306 远程 fallback，也不调用 `TrainDataProvider.search_segments()`。本地数据缺失时返回无方案；覆盖不足需要通过静态库诊断和后续离线刷新流程处理。静态公布票价不等于实时有票，当前时间扩展图也不宣称具备全国完整覆盖。
+
 ### 静态票价库模式
 
 如果已经通过 `backend/scripts/refresh_static_prices.py` 刷新过本地静态票价库，可以使用 `static-price` provider 查询 SQLite 本地数据。

@@ -321,8 +321,17 @@ async def test_stream_snapshots_replace_previous_top_plans() -> None:
     assert snapshots[0]["plans"][0].total_price == Decimal("300")
     assert snapshots[-1]["plans"][0].total_price == Decimal("100")
     assert snapshots[-1]["plans"][0].transfer_stations == ["便宜中转"]
-    assert snapshots[-1]["final"] is True
+    assert snapshots[-1].get("final") is True
     assert snapshots[-1]["pending_count"] == 0
+
+
+def test_route_search_service_exposes_engine_status() -> None:
+    provider = MockTrainDataProvider()
+    service = RouteSearchService(provider)
+
+    assert service.source == "mock"
+    assert service.status["search_engine"] == "candidate"
+    assert service.status["provider"] == "mock"
 
 
 @pytest.mark.asyncio
@@ -647,6 +656,23 @@ def test_a_star_ranked_candidates_prefers_higher_telemetry_hit_count(tmp_path) -
     assert candidates[:2] == ["高命中", "低命中"]
 
 
+def test_one_transfer_ranked_candidates_also_use_telemetry(tmp_path) -> None:
+    telemetry = SqliteSearchTelemetryRecorder(tmp_path / "telemetry.sqlite")
+    provider = CandidateOrderProvider(["静态一", "静态二"])
+    query = RouteQuery(from_station="起点", to_station="终点", date=date(2026, 7, 1), max_transfers=1)
+    telemetry.record_search(
+        query=query,
+        provider=provider.name,
+        plans=[telemetry_plan("历史站", "10")],
+        remote_query_count=1,
+    )
+    service = RouteSearchService(provider, telemetry_recorder=telemetry)
+
+    candidates = service._ranked_transfer_candidates(query)
+
+    assert candidates == ["历史站", "静态一", "静态二"]
+
+
 @pytest.mark.asyncio
 async def test_search_stops_requesting_segments_after_budget_exhausted() -> None:
     provider = CountingMockTrainDataProvider()
@@ -692,6 +718,11 @@ def test_route_query_strips_station_names() -> None:
         {"from_station": "北京", "to_station": "北京", "date": date(2026, 7, 1)},
         {"from_station": "北" * 65, "to_station": "上海", "date": date(2026, 7, 1)},
         {"from_station": "北京", "to_station": "上海", "date": date(2026, 7, 1), "max_total_duration_minutes": 59},
+        {"from_station": "北京", "to_station": "上海", "date": date(2026, 7, 1), "candidate_limit": 0},
+        {"from_station": "北京", "to_station": "上海", "date": date(2026, 7, 1), "candidate_limit": 201},
+        {"from_station": "北京", "to_station": "上海", "date": date(2026, 7, 1), "candidate_strategy": "unknown"},
+        {"from_station": "北京", "to_station": "上海", "date": date(2026, 7, 1), "max_detour_ratio": -1},
+        {"from_station": "北京", "to_station": "上海", "date": date(2026, 7, 1), "corridor_width_km": 0},
     ],
 )
 def test_route_query_rejects_invalid_station_or_duration(payload) -> None:

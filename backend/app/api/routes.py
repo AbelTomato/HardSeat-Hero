@@ -12,12 +12,12 @@ from app.adapters.base import (
 )
 from app.adapters.provider_factory import create_train_data_provider
 from app.domain.models import RouteQuery, RouteSearchResponse, StationSearchResponse
-from app.services.route_search import RouteSearchService
+from app.services.route_search_engine_factory import create_route_search_engine
 
 
 router = APIRouter()
 provider = create_train_data_provider()
-route_search_service = RouteSearchService(provider)
+route_search_service = create_route_search_engine(provider)
 
 
 @router.get("/health")
@@ -42,16 +42,10 @@ async def search_stations(q: str = "") -> StationSearchResponse:
 
 @router.get("/providers/status")
 async def provider_status() -> dict[str, object]:
-    return {
-        "provider": provider.name,
-        "status": "ok",
-        "transfer_candidate_enabled": provider.name != "mock",
-        "max_remote_queries": route_search_service.max_remote_queries,
-        "max_concurrent_remote_queries": route_search_service.max_concurrent_remote_queries,
-        "last_remote_query_count": route_search_service.remote_query_count,
-        "last_diagnostics": route_search_service.last_diagnostics.as_dict(),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
+    status = dict(route_search_service.status)
+    status.setdefault("online_remote_io", False)
+    status["updated_at"] = datetime.now(timezone.utc).isoformat()
+    return status
 
 
 @router.post("/routes/search", response_model=RouteSearchResponse)
@@ -79,7 +73,7 @@ async def stream_routes(query: RouteQuery) -> StreamingResponse:
                 {
                     "type": "metadata",
                     "query_id": f"{query.date.isoformat()}:{query.from_station}:{query.to_station}",
-                    "source": route_search_service.provider.name,
+                    "source": route_search_service.source,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                     "elapsed_ms": max(0, round((perf_counter() - started_at) * 1000)),
                 },

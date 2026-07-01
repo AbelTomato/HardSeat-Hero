@@ -25,6 +25,25 @@ class StaticOdMinPrice:
     updated_at: datetime
 
 
+@dataclass(frozen=True)
+class TrainOdPriceSnapshot:
+    provider: str
+    service_date: date
+    train_no: str
+    train_code: str
+    from_station: str
+    to_station: str
+    from_station_no: int
+    to_station_no: int
+    depart_at: datetime
+    arrive_at: datetime
+    duration_minutes: int
+    seat_type: str
+    price: Decimal
+    source: str
+    fetched_at: datetime
+
+
 class SQLiteStaticPriceRepository:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
@@ -162,6 +181,56 @@ class SQLiteStaticPriceRepository:
             fetched_at=datetime.fromisoformat(row["fetched_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
+
+    def query_train_od_prices(
+        self,
+        provider: str,
+        service_dates: list[date],
+        *,
+        from_station: str | None = None,
+        to_station: str | None = None,
+    ) -> list[TrainOdPriceSnapshot]:
+        if not service_dates:
+            return []
+
+        placeholders = ",".join("?" for _ in service_dates)
+        sql = f"""
+            SELECT * FROM train_od_price_snapshot
+            WHERE provider = ? AND service_date IN ({placeholders})
+        """
+        params: list[str] = [provider, *(service_date.isoformat() for service_date in service_dates)]
+        if from_station is not None:
+            sql += " AND from_station = ?"
+            params.append(from_station)
+        if to_station is not None:
+            sql += " AND to_station = ?"
+            params.append(to_station)
+        sql += " ORDER BY CAST(price AS REAL) ASC, depart_at ASC, train_code ASC, seat_type ASC"
+
+        with sqlite3.connect(self.db_path) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(sql, params).fetchall()
+
+        return [
+            TrainOdPriceSnapshot(
+                provider=row["provider"],
+                service_date=date.fromisoformat(row["service_date"]),
+                train_no=row["train_no"],
+                train_code=row["train_code"],
+                from_station=row["from_station"],
+                to_station=row["to_station"],
+                from_station_no=row["from_station_no"],
+                to_station_no=row["to_station_no"],
+                depart_at=datetime.fromisoformat(row["depart_at"]),
+                arrive_at=datetime.fromisoformat(row["arrive_at"]),
+                duration_minutes=row["duration_minutes"],
+                seat_type=row["seat_type"],
+                price=Decimal(row["price"]),
+                source=row["source"],
+                fetched_at=datetime.fromisoformat(row["fetched_at"]),
+            )
+            for row in rows
+        ]
 
     def is_stale(
         self,
@@ -357,6 +426,101 @@ class SQLiteStaticPriceRepository:
                 """
                 CREATE INDEX IF NOT EXISTS idx_crawl_task_pick
                 ON crawl_task(status, priority, next_retry_at, id)
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS train_service_snapshot (
+                    provider TEXT NOT NULL,
+                    service_date TEXT NOT NULL,
+                    train_no TEXT NOT NULL,
+                    train_code TEXT NOT NULL,
+                    start_station TEXT NOT NULL,
+                    end_station TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL,
+                    raw_hash TEXT,
+                    PRIMARY KEY(provider, service_date, train_no)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_train_service_code
+                ON train_service_snapshot(provider, service_date, train_code)
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS train_stop_snapshot (
+                    provider TEXT NOT NULL,
+                    service_date TEXT NOT NULL,
+                    train_no TEXT NOT NULL,
+                    train_code TEXT NOT NULL,
+                    station_name TEXT NOT NULL,
+                    station_no INTEGER NOT NULL,
+                    arrive_at TEXT,
+                    depart_at TEXT,
+                    arrive_day_diff INTEGER NOT NULL DEFAULT 0,
+                    running_time TEXT,
+                    fetched_at TEXT NOT NULL,
+                    raw_hash TEXT,
+                    PRIMARY KEY(provider, service_date, train_no, station_no)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_train_stop_station_time
+                ON train_stop_snapshot(provider, service_date, station_name, depart_at)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_train_stop_train
+                ON train_stop_snapshot(provider, service_date, train_no, station_no)
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS train_od_price_snapshot (
+                    provider TEXT NOT NULL,
+                    service_date TEXT NOT NULL,
+                    train_no TEXT NOT NULL,
+                    train_code TEXT NOT NULL,
+                    from_station TEXT NOT NULL,
+                    to_station TEXT NOT NULL,
+                    from_station_no INTEGER NOT NULL,
+                    to_station_no INTEGER NOT NULL,
+                    depart_at TEXT NOT NULL,
+                    arrive_at TEXT NOT NULL,
+                    duration_minutes INTEGER NOT NULL,
+                    seat_type TEXT NOT NULL,
+                    price TEXT NOT NULL,
+                    currency TEXT NOT NULL DEFAULT 'CNY',
+                    source TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL,
+                    raw_hash TEXT,
+                    PRIMARY KEY(
+                        provider,
+                        service_date,
+                        train_code,
+                        from_station,
+                        to_station,
+                        seat_type
+                    )
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_train_od_price_query
+                ON train_od_price_snapshot(provider, service_date, from_station, to_station, price)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_train_od_price_train
+                ON train_od_price_snapshot(provider, service_date, train_no, from_station_no, to_station_no)
                 """
             )
 

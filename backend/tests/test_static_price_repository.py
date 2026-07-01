@@ -1,8 +1,9 @@
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+import sqlite3
 
 from app.domain.models import SeatPrice, TrainSegment
-from app.services.static_price_repository import SQLiteStaticPriceRepository
+from app.services.static_price_repository import SQLiteStaticPriceRepository, TrainOdPriceSnapshot
 
 
 def make_segment(
@@ -146,3 +147,101 @@ def test_static_price_repository_filters_stale_segments_and_min_price(tmp_path) 
         timedelta(days=7),
         now=now,
     )
+
+
+def test_time_expanded_tables_are_created(tmp_path) -> None:
+    db = tmp_path / "static.sqlite3"
+    SQLiteStaticPriceRepository(db)
+
+    with sqlite3.connect(db) as connection:
+        names = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+
+    assert "train_service_snapshot" in names
+    assert "train_stop_snapshot" in names
+    assert "train_od_price_snapshot" in names
+
+
+def test_static_price_repository_queries_train_od_prices(tmp_path) -> None:
+    repository = SQLiteStaticPriceRepository(tmp_path / "static_prices.sqlite3")
+    fetched_at = datetime(2026, 6, 26, 8, 0, tzinfo=timezone.utc)
+
+    with sqlite3.connect(repository.db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO train_od_price_snapshot(
+                provider, service_date, train_no, train_code,
+                from_station, to_station, from_station_no, to_station_no,
+                depart_at, arrive_at, duration_minutes, seat_type,
+                price, currency, source, fetched_at, raw_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CNY', ?, ?, NULL)
+            """,
+            (
+                "12306-public-price",
+                date(2026, 7, 1).isoformat(),
+                "G1",
+                "G1",
+                "北京",
+                "上海",
+                1,
+                16,
+                datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc).isoformat(),
+                datetime(2026, 7, 1, 10, 0, tzinfo=timezone.utc).isoformat(),
+                120,
+                "二等座",
+                "553.0",
+                "fixture",
+                fetched_at.isoformat(),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO train_od_price_snapshot(
+                provider, service_date, train_no, train_code,
+                from_station, to_station, from_station_no, to_station_no,
+                depart_at, arrive_at, duration_minutes, seat_type,
+                price, currency, source, fetched_at, raw_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CNY', ?, ?, NULL)
+            """,
+            (
+                "12306-public-price",
+                date(2026, 7, 2).isoformat(),
+                "D1",
+                "D1",
+                "北京",
+                "上海",
+                1,
+                16,
+                datetime(2026, 7, 2, 9, 0, tzinfo=timezone.utc).isoformat(),
+                datetime(2026, 7, 2, 11, 0, tzinfo=timezone.utc).isoformat(),
+                120,
+                "二等座",
+                "309.0",
+                "fixture",
+                fetched_at.isoformat(),
+            ),
+        )
+
+    snapshots = repository.query_train_od_prices(
+        "12306-public-price",
+        [date(2026, 7, 1), date(2026, 7, 2)],
+        from_station="北京",
+        to_station="上海",
+    )
+
+    assert [snapshot.train_no for snapshot in snapshots] == ["D1", "G1"]
+    assert all(isinstance(snapshot, TrainOdPriceSnapshot) for snapshot in snapshots)
+    assert snapshots[0].price == Decimal("309.0")
+    assert isinstance(snapshots[0].depart_at, datetime)
+    assert isinstance(snapshots[0].arrive_at, datetime)
+    assert snapshots[0].from_station_no == 1
+    assert snapshots[0].to_station_no == 16
+    assert snapshots[0].fetched_at == fetched_at
+
+
+def test_static_price_repository_query_train_od_prices_returns_empty_for_empty_dates(tmp_path) -> None:
+    repository = SQLiteStaticPriceRepository(tmp_path / "static_prices.sqlite3")
+
+    assert repository.query_train_od_prices("provider", []) == []

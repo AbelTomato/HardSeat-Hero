@@ -12,6 +12,7 @@ import { Input } from "./components/ui/input";
 import {
   ApiError,
   ProviderStatusResponse,
+  RouteSearchRequest,
   RouteSearchResponse,
   getProviderStatus,
   searchRoutesStream,
@@ -19,12 +20,21 @@ import {
 } from "./lib/api";
 
 const today = new Date().toISOString().slice(0, 10);
+type CandidateStrategy = NonNullable<RouteSearchRequest["candidate_strategy"]>;
 
 export function App() {
   const [fromStation, setFromStation] = useState("北京");
   const [toStation, setToStation] = useState("上海");
   const [date, setDate] = useState(today);
   const [minTransferMinutes, setMinTransferMinutes] = useState(30);
+  const [maxTransfers, setMaxTransfers] = useState(1);
+  const [candidateLimit, setCandidateLimit] = useState(50);
+  const [candidateStrategy, setCandidateStrategy] =
+    useState<CandidateStrategy>("balanced");
+  const [maxDetourRatio, setMaxDetourRatio] = useState("");
+  const [maxDetourKm, setMaxDetourKm] = useState("");
+  const [corridorWidthKm, setCorridorWidthKm] = useState("");
+  const [maxTotalDurationMinutes, setMaxTotalDurationMinutes] = useState("");
   const [fromStationOptions, setFromStationOptions] = useState<string[]>([]);
   const [toStationOptions, setToStationOptions] = useState<string[]>([]);
   const [result, setResult] = useState<RouteSearchResponse | null>(null);
@@ -109,15 +119,23 @@ export function App() {
     setError(null);
     setResult(null);
 
+    const payload: RouteSearchRequest = {
+      from_station: fromStation,
+      to_station: toStation,
+      date,
+      max_transfers: maxTransfers,
+      min_transfer_minutes: minTransferMinutes,
+      candidate_limit: candidateLimit,
+      candidate_strategy: candidateStrategy,
+      max_detour_ratio: parseOptionalNumber(maxDetourRatio),
+      max_detour_km: parseOptionalNumber(maxDetourKm),
+      corridor_width_km: parseOptionalNumber(corridorWidthKm),
+      max_total_duration_minutes: parseOptionalNumber(maxTotalDurationMinutes),
+    };
+
     try {
       const response = await searchRoutesStream(
-        {
-          from_station: fromStation,
-          to_station: toStation,
-          date,
-          max_transfers: 1,
-          min_transfer_minutes: minTransferMinutes,
-        },
+        payload,
         (partialResponse) => setResult(partialResponse),
         abortController.signal,
       );
@@ -270,6 +288,94 @@ export function App() {
                 中断
               </Button>
             ) : null}
+            <div className="grid gap-3 rounded-md border border-dashed border-zinc-200 bg-zinc-50 p-3 md:col-span-full md:grid-cols-4">
+              <Field label="最大中转次数">
+                <select
+                  className="h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none transition focus:border-zinc-950"
+                  value={maxTransfers}
+                  onChange={(event) =>
+                    setMaxTransfers(Number(event.target.value))
+                  }
+                >
+                  <option value={0}>0 次（只查直达）</option>
+                  <option value={1}>1 次</option>
+                  <option value={2}>2 次</option>
+                </select>
+              </Field>
+              <Field label="搜索策略">
+                <select
+                  className="h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none transition focus:border-zinc-950"
+                  value={candidateStrategy}
+                  onChange={(event) =>
+                    setCandidateStrategy(
+                      event.target.value as CandidateStrategy,
+                    )
+                  }
+                >
+                  <option value="balanced">标准</option>
+                  <option value="direct_corridor">保守走廊</option>
+                  <option value="wide_detour">允许绕行</option>
+                  <option value="hub_first">枢纽优先</option>
+                  <option value="exhaustive_budgeted">预算内尽量扩展</option>
+                </select>
+              </Field>
+              <Field label="候选站上限">
+                <Input
+                  type="number"
+                  min={1}
+                  max={200}
+                  value={candidateLimit}
+                  onChange={(event) =>
+                    setCandidateLimit(Number(event.target.value))
+                  }
+                />
+              </Field>
+              <Field label="最大总耗时（分钟，可空）">
+                <Input
+                  type="number"
+                  min={60}
+                  value={maxTotalDurationMinutes}
+                  onChange={(event) =>
+                    setMaxTotalDurationMinutes(event.target.value)
+                  }
+                  placeholder="不限制"
+                />
+              </Field>
+              <Field label="最大绕行比例，可空">
+                <Input
+                  type="number"
+                  min={0}
+                  max={3}
+                  step={0.1}
+                  value={maxDetourRatio}
+                  onChange={(event) => setMaxDetourRatio(event.target.value)}
+                  placeholder="策略默认"
+                />
+              </Field>
+              <Field label="最大绕行公里，可空">
+                <Input
+                  type="number"
+                  min={0}
+                  max={5000}
+                  value={maxDetourKm}
+                  onChange={(event) => setMaxDetourKm(event.target.value)}
+                  placeholder="策略默认"
+                />
+              </Field>
+              <Field label="走廊宽度 km，可空">
+                <Input
+                  type="number"
+                  min={1}
+                  max={2000}
+                  value={corridorWidthKm}
+                  onChange={(event) => setCorridorWidthKm(event.target.value)}
+                  placeholder="策略默认"
+                />
+              </Field>
+              <div className="text-xs leading-5 text-zinc-500 md:col-span-1 md:self-end">
+                搜索越深，请求越多、耗时越长，但更不容易漏掉绕行中转方案。
+              </div>
+            </div>
           </form>
         </section>
 
@@ -350,7 +456,8 @@ export function App() {
                                   key={`${seatPrice.seat_type}-${seatPrice.price}`}
                                   className="rounded-full border border-zinc-200 bg-white px-2 py-1"
                                 >
-                                  {seatPrice.seat_type} {formatSeatPrice(seatPrice.price)}
+                                  {seatPrice.seat_type}{" "}
+                                  {formatSeatPrice(seatPrice.price)}
                                   {remaining ? ` · ${remaining}` : ""}
                                 </span>
                               );
@@ -443,6 +550,14 @@ function formatStationList(stations: string[] | undefined) {
     return "-";
   }
   return stations.slice(0, 8).join("、") + (stations.length > 8 ? " 等" : "");
+}
+
+function parseOptionalNumber(value: string) {
+  if (value.trim() === "") {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function formatSeatPrice(price: string) {
