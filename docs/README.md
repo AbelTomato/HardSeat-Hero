@@ -30,6 +30,7 @@
 ### `research/` 调研资料
 
 - `数据源调研.md`
+- `12306_query_train_info_probe.md`
 
 ### `logs/` 日志
 
