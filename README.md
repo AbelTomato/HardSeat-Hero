@@ -9,6 +9,25 @@
 - 数据源：通过 `TrainDataProvider` 统一适配 Mock、12306 公布票价接口和 SQLite 静态票价库。
 - 默认数据源为 `mock`；可通过 `TRAIN_DATA_PROVIDER=12306-public-price` 试用 12306 公布票价接口，或通过 `TRAIN_DATA_PROVIDER=static-price` 使用本地静态票价库。
 
+## 环境变量
+
+仓库根目录提供了 `.env.example`，可以复制为 `.env` 后按需修改。当前项目实际使用到的环境变量如下：
+
+| 变量                              | 默认值                               | 说明                                                                                                             |
+| --------------------------------- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `TRAIN_DATA_PROVIDER`             | `mock`                               | 后端数据源。可选 `mock`、`12306-public-price`、`static-price`。                                                  |
+| `STATIC_PRICE_DB`                 | `./data/static_prices.sqlite3`       | 当 `TRAIN_DATA_PROVIDER=static-price` 时必填，本地静态票价库路径。                                               |
+| `STATIC_PRICE_MODE`               | `static-only`                        | 静态票价库模式。可选 `static-only`、`local-only`、`static-with-remote-fallback`、`remote-fallback`、`fallback`。 |
+| `STATIC_PRICE_FALLBACK_PROVIDER`  | `12306-public-price`                 | `STATIC_PRICE_MODE` 需要远程回填时使用的数据源。                                                                 |
+| `STATIC_PRICE_MAX_AGE_DAYS`       | 空                                   | 静态票价最大可接受年龄（天）；空值表示不限制。                                                                   |
+| `ROUTE_SEARCH_ENGINE`             | `candidate`                          | 路线搜索引擎。可选 `candidate`、`time-expanded`。                                                                |
+| `TIME_EXPANDED_GRAPH_DB`          | `./data/static_prices.sqlite3`       | 当 `ROUTE_SEARCH_ENGINE=time-expanded` 时必填；优先于 `STATIC_PRICE_DB`。                                        |
+| `TIME_EXPANDED_GRAPH_PROVIDER`    | `12306-public-price`                 | `time-expanded` 模式下读取的来源标识。                                                                           |
+| `ROUTE_SEGMENT_CACHE_DB`          | `./data/route_segment_cache.sqlite3` | 可选，本地中转段缓存 SQLite 路径。                                                                               |
+| `ROUTE_SEGMENT_CACHE_TTL_SECONDS` | 启动参数默认值                       | 可选，中转段缓存 TTL（秒）。                                                                                     |
+| `SEARCH_TELEMETRY_DB`             | `./data/search_telemetry.sqlite3`    | 可选，搜索遥测 SQLite 路径。                                                                                     |
+| `VITE_API_BASE_URL`               | `http://localhost:8000`              | 前端调用后端 API 的基础地址。                                                                                    |
+
 ## 目录
 
 ```text
@@ -42,12 +61,12 @@ uvicorn app.main:app --reload --port 8000
 ### 可选缓存和遥测
 
 ```powershell
-$env:ROUTE_SEGMENT_CACHE_DB = "D:\path\to\HardSeat-Hero\data\route_segment_cache.sqlite3"
+$env:ROUTE_SEGMENT_CACHE_DB = ".\data\route_segment_cache.sqlite3"
 $env:ROUTE_SEGMENT_CACHE_TTL_SECONDS = "3600"
-$env:SEARCH_TELEMETRY_DB = "D:\path\to\HardSeat-Hero\data\search_telemetry.sqlite3"
+$env:SEARCH_TELEMETRY_DB = ".\data\search_telemetry.sqlite3"
 ```
 
-这些 SQLite 文件属于本地运行时数据，已在 `.gitignore` 中忽略。
+这些 SQLite 文件属于本地运行时数据，已在 `.gitignore` 中忽略。更多环境变量含义见上面的表格。
 
 ### 搜索引擎切换
 
@@ -64,7 +83,7 @@ uvicorn app.main:app --reload --port 8000
 
 ```powershell
 $env:ROUTE_SEARCH_ENGINE = "time-expanded"
-$env:TIME_EXPANDED_GRAPH_DB = "D:\path\to\HardSeat-Hero\data\static_prices.sqlite3"
+$env:TIME_EXPANDED_GRAPH_DB = ".\data\static_prices.sqlite3"
 $env:TIME_EXPANDED_GRAPH_PROVIDER = "12306-public-price"
 uvicorn app.main:app --reload --port 8000
 ```
@@ -119,13 +138,12 @@ backend\.venv\Scripts\python.exe backend\scripts\crawl_time_expanded_full_snapsh
 
 静态票价库文件（例如 `data/static_prices.sqlite3`）属于本地运行时数据，不应提交到 Git。仓库只跟踪 `data/seed_od.csv` 这类种子输入；首次使用静态库模式前，需要按下方“手动刷新静态库示例”在本机生成或更新 SQLite 文件。
 
-推荐使用 `STATIC_PRICE_DB` 的**绝对路径**，避免从项目根目录和 `backend/` 目录启动时解析到不同数据库文件。
+推荐使用相对路径或统一的仓库内路径，避免从项目根目录和 `backend/` 目录启动时解析到不同数据库文件。
 
 只读本地静态库：
 
 ```powershell
-$env:TRAIN_DATA_PROVIDER = "static-price"
-$env:STATIC_PRICE_DB = "D:\path\to\HardSeat-Hero\data\static_prices.sqlite3"
+$env:STATIC_PRICE_DB = ".\data\static_prices.sqlite3"
 $env:STATIC_PRICE_MODE = "static-only"
 $env:STATIC_PRICE_MAX_AGE_DAYS = "30"
 uvicorn app.main:app --reload --port 8000
@@ -134,8 +152,7 @@ uvicorn app.main:app --reload --port 8000
 本地未命中或过期时远程补洞并写回静态库：
 
 ```powershell
-$env:TRAIN_DATA_PROVIDER = "static-price"
-$env:STATIC_PRICE_DB = "D:\path\to\HardSeat-Hero\data\static_prices.sqlite3"
+$env:STATIC_PRICE_DB = ".\data\static_prices.sqlite3"
 $env:STATIC_PRICE_MODE = "static-with-remote-fallback"
 $env:STATIC_PRICE_FALLBACK_PROVIDER = "12306-public-price"
 $env:STATIC_PRICE_MAX_AGE_DAYS = "30"
@@ -184,7 +201,7 @@ pnpm install
 pnpm dev
 ```
 
-默认连接 `http://localhost:8000`。如需修改后端地址，设置 `VITE_API_BASE_URL`。
+默认连接 `http://localhost:8000`。如需修改后端地址，设置 `VITE_API_BASE_URL`，该变量也已写入 `.env.example`。
 
 ## 测试
 
