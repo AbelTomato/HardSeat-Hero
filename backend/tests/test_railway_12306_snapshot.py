@@ -90,3 +90,15 @@ async def test_snapshot_client_rejects_non_json() -> None:
     with pytest.raises(Railway12306Error, match="返回非 JSON"):
         await client.fetch_train_names(date(2026, 7, 12))
     await client.http_client.aclose()  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_client_reports_unexpected_data_shape() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": True, "data": {"errorMsg": "busy"}})
+
+    client = Railway12306SnapshotClient(http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+
+    with pytest.raises(Railway12306Error, match="data 不是列表.*type=dict"):
+        await client.fetch_train_stops(date(2026, 7, 12), "G1NO")
+    await client.http_client.aclose()  # type: ignore[union-attr]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -108,10 +109,22 @@ class Railway12306SnapshotClient:
 def _extract_data_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     data = payload.get("data", [])
     if isinstance(data, dict):
+        if "data" not in data:
+            raise Railway12306Error(f"全量快照接口 data 不是列表：{_describe_payload_value(data)}")
         data = data.get("data", [])
     if not isinstance(data, list):
-        raise Railway12306Error("全量快照接口 data 不是列表")
+        raise Railway12306Error(f"全量快照接口 data 不是列表：{_describe_payload_value(data)}")
     return [row for row in data if isinstance(row, dict)]
+
+
+def _describe_payload_value(value: Any, *, max_length: int = 300) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        text = repr(value)
+    if len(text) > max_length:
+        text = f"{text[:max_length]}..."
+    return f"type={type(value).__name__}, value={text}"
 
 
 def _parse_stop(row: dict[str, Any]) -> SnapshotTrainStop:
