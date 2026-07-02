@@ -1,9 +1,9 @@
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 import sqlite3
 
 from app.domain.models import SeatPrice, TrainSegment
-from app.services.static_price_repository import SQLiteStaticPriceRepository, TrainOdPriceSnapshot
+from app.services.static_price_repository import SQLiteStaticPriceRepository, TrainOdFareEdge, TrainOdPriceSnapshot
 
 
 def make_segment(
@@ -162,6 +162,7 @@ def test_time_expanded_tables_are_created(tmp_path) -> None:
     assert "train_service_snapshot" in names
     assert "train_stop_snapshot" in names
     assert "train_od_price_snapshot" in names
+    assert "train_od_fare_edge" in names
 
 
 def test_static_price_repository_queries_train_od_prices(tmp_path) -> None:
@@ -245,3 +246,121 @@ def test_static_price_repository_query_train_od_prices_returns_empty_for_empty_d
     repository = SQLiteStaticPriceRepository(tmp_path / "static_prices.sqlite3")
 
     assert repository.query_train_od_prices("provider", []) == []
+
+
+def test_static_price_repository_upserts_and_queries_train_od_fare_edges(tmp_path) -> None:
+    repository = SQLiteStaticPriceRepository(tmp_path / "static_prices.sqlite3")
+    fetched_at = datetime(2026, 6, 26, 8, 0, tzinfo=timezone.utc)
+
+    edge = TrainOdFareEdge(
+        provider="full-snapshot",
+        train_no="240000G1010A",
+        train_code="G1",
+        from_station="北京",
+        to_station="上海",
+        from_station_no=1,
+        to_station_no=16,
+        depart_time=time(8, 0),
+        arrive_time=time(13, 0),
+        depart_day_offset=0,
+        arrive_day_offset=0,
+        duration_minutes=300,
+        seat_type="二等座",
+        price=Decimal("553.0"),
+        source="12306-full-snapshot",
+        fetched_at=fetched_at,
+        raw_hash="abc",
+    )
+
+    repository.upsert_train_od_fare_edges("full-snapshot", [edge])
+
+    edges = repository.query_train_od_fare_edges("full-snapshot", from_station="北京", to_station="上海")
+
+    assert len(edges) == 1
+    assert isinstance(edges[0], TrainOdFareEdge)
+    assert edges[0].price == Decimal("553.0")
+    assert edges[0].depart_time == time(8, 0)
+    assert edges[0].arrive_time == time(13, 0)
+    assert edges[0].depart_day_offset == 0
+    assert edges[0].arrive_day_offset == 0
+    assert edges[0].fetched_at == fetched_at
+    assert edges[0].raw_hash == "abc"
+
+
+def test_static_price_repository_upsert_train_od_fare_edges_updates_same_key(tmp_path) -> None:
+    repository = SQLiteStaticPriceRepository(tmp_path / "static_prices.sqlite3")
+    fetched_at = datetime(2026, 6, 26, 8, 0, tzinfo=timezone.utc)
+    base = TrainOdFareEdge(
+        provider="full-snapshot",
+        train_no="G1NO",
+        train_code="G1",
+        from_station="北京",
+        to_station="上海",
+        from_station_no=1,
+        to_station_no=16,
+        depart_time=time(8, 0),
+        arrive_time=time(13, 0),
+        depart_day_offset=0,
+        arrive_day_offset=0,
+        duration_minutes=300,
+        seat_type="二等座",
+        price=Decimal("553.0"),
+        source="fixture",
+        fetched_at=fetched_at,
+    )
+    updated = TrainOdFareEdge(**{**base.__dict__, "price": Decimal("500.0")})
+
+    repository.upsert_train_od_fare_edges("full-snapshot", [base])
+    repository.upsert_train_od_fare_edges("full-snapshot", [updated])
+
+    edges = repository.query_train_od_fare_edges("full-snapshot")
+    assert len(edges) == 1
+    assert edges[0].price == Decimal("500.0")
+
+
+def test_static_price_repository_query_train_od_fare_edges_filters_station(tmp_path) -> None:
+    repository = SQLiteStaticPriceRepository(tmp_path / "static_prices.sqlite3")
+    fetched_at = datetime(2026, 6, 26, 8, 0, tzinfo=timezone.utc)
+    edges = [
+        TrainOdFareEdge(
+            provider="full-snapshot",
+            train_no="D1NO",
+            train_code="D1",
+            from_station="北京",
+            to_station="南京",
+            from_station_no=1,
+            to_station_no=2,
+            depart_time=time(8, 0),
+            arrive_time=time(10, 0),
+            depart_day_offset=0,
+            arrive_day_offset=0,
+            duration_minutes=120,
+            seat_type="二等座",
+            price=Decimal("100"),
+            source="fixture",
+            fetched_at=fetched_at,
+        ),
+        TrainOdFareEdge(
+            provider="full-snapshot",
+            train_no="D2NO",
+            train_code="D2",
+            from_station="南京",
+            to_station="上海",
+            from_station_no=1,
+            to_station_no=2,
+            depart_time=time(11, 0),
+            arrive_time=time(12, 0),
+            depart_day_offset=0,
+            arrive_day_offset=0,
+            duration_minutes=60,
+            seat_type="二等座",
+            price=Decimal("80"),
+            source="fixture",
+            fetched_at=fetched_at,
+        ),
+    ]
+    repository.upsert_train_od_fare_edges("full-snapshot", edges)
+
+    filtered = repository.query_train_od_fare_edges("full-snapshot", from_station="南京")
+
+    assert [edge.train_code for edge in filtered] == ["D2"]

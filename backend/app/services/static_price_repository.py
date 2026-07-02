@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -42,6 +42,27 @@ class TrainOdPriceSnapshot:
     price: Decimal
     source: str
     fetched_at: datetime
+
+
+@dataclass(frozen=True)
+class TrainOdFareEdge:
+    provider: str
+    train_no: str
+    train_code: str
+    from_station: str
+    to_station: str
+    from_station_no: int
+    to_station_no: int
+    depart_time: time
+    arrive_time: time
+    depart_day_offset: int
+    arrive_day_offset: int
+    duration_minutes: int
+    seat_type: str
+    price: Decimal
+    source: str
+    fetched_at: datetime
+    raw_hash: str | None = None
 
 
 class SQLiteStaticPriceRepository:
@@ -228,6 +249,110 @@ class SQLiteStaticPriceRepository:
                 price=Decimal(row["price"]),
                 source=row["source"],
                 fetched_at=datetime.fromisoformat(row["fetched_at"]),
+            )
+            for row in rows
+        ]
+
+    def upsert_train_od_fare_edges(
+        self,
+        provider: str,
+        edges: list[TrainOdFareEdge],
+    ) -> None:
+        if not edges:
+            return
+
+        with sqlite3.connect(self.db_path) as connection:
+            connection.executemany(
+                """
+                INSERT INTO train_od_fare_edge(
+                    provider, train_no, train_code,
+                    from_station, to_station, from_station_no, to_station_no,
+                    depart_time, arrive_time, depart_day_offset, arrive_day_offset,
+                    duration_minutes, seat_type, price, currency, source, fetched_at, raw_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CNY', ?, ?, ?)
+                ON CONFLICT(provider, train_code, from_station, to_station, seat_type)
+                DO UPDATE SET
+                    train_no = excluded.train_no,
+                    from_station_no = excluded.from_station_no,
+                    to_station_no = excluded.to_station_no,
+                    depart_time = excluded.depart_time,
+                    arrive_time = excluded.arrive_time,
+                    depart_day_offset = excluded.depart_day_offset,
+                    arrive_day_offset = excluded.arrive_day_offset,
+                    duration_minutes = excluded.duration_minutes,
+                    price = excluded.price,
+                    currency = excluded.currency,
+                    source = excluded.source,
+                    fetched_at = excluded.fetched_at,
+                    raw_hash = excluded.raw_hash
+                """,
+                [
+                    (
+                        provider,
+                        edge.train_no,
+                        edge.train_code,
+                        edge.from_station,
+                        edge.to_station,
+                        edge.from_station_no,
+                        edge.to_station_no,
+                        edge.depart_time.isoformat(timespec="minutes"),
+                        edge.arrive_time.isoformat(timespec="minutes"),
+                        edge.depart_day_offset,
+                        edge.arrive_day_offset,
+                        edge.duration_minutes,
+                        edge.seat_type,
+                        str(edge.price),
+                        edge.source,
+                        edge.fetched_at.isoformat(),
+                        edge.raw_hash,
+                    )
+                    for edge in edges
+                ],
+            )
+
+    def query_train_od_fare_edges(
+        self,
+        provider: str,
+        *,
+        from_station: str | None = None,
+        to_station: str | None = None,
+    ) -> list[TrainOdFareEdge]:
+        sql = """
+            SELECT * FROM train_od_fare_edge
+            WHERE provider = ?
+        """
+        params: list[str] = [provider]
+        if from_station is not None:
+            sql += " AND from_station = ?"
+            params.append(from_station)
+        if to_station is not None:
+            sql += " AND to_station = ?"
+            params.append(to_station)
+        sql += " ORDER BY CAST(price AS REAL) ASC, depart_time ASC, train_code ASC, seat_type ASC"
+
+        with sqlite3.connect(self.db_path) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(sql, params).fetchall()
+
+        return [
+            TrainOdFareEdge(
+                provider=row["provider"],
+                train_no=row["train_no"],
+                train_code=row["train_code"],
+                from_station=row["from_station"],
+                to_station=row["to_station"],
+                from_station_no=row["from_station_no"],
+                to_station_no=row["to_station_no"],
+                depart_time=time.fromisoformat(row["depart_time"]),
+                arrive_time=time.fromisoformat(row["arrive_time"]),
+                depart_day_offset=row["depart_day_offset"],
+                arrive_day_offset=row["arrive_day_offset"],
+                duration_minutes=row["duration_minutes"],
+                seat_type=row["seat_type"],
+                price=Decimal(row["price"]),
+                source=row["source"],
+                fetched_at=datetime.fromisoformat(row["fetched_at"]),
+                raw_hash=row["raw_hash"],
             )
             for row in rows
         ]
@@ -521,6 +646,49 @@ class SQLiteStaticPriceRepository:
                 """
                 CREATE INDEX IF NOT EXISTS idx_train_od_price_train
                 ON train_od_price_snapshot(provider, service_date, train_no, from_station_no, to_station_no)
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS train_od_fare_edge (
+                    provider TEXT NOT NULL,
+                    train_no TEXT NOT NULL,
+                    train_code TEXT NOT NULL,
+                    from_station TEXT NOT NULL,
+                    to_station TEXT NOT NULL,
+                    from_station_no INTEGER NOT NULL,
+                    to_station_no INTEGER NOT NULL,
+                    depart_time TEXT NOT NULL,
+                    arrive_time TEXT NOT NULL,
+                    depart_day_offset INTEGER NOT NULL DEFAULT 0,
+                    arrive_day_offset INTEGER NOT NULL DEFAULT 0,
+                    duration_minutes INTEGER NOT NULL,
+                    seat_type TEXT NOT NULL,
+                    price TEXT NOT NULL,
+                    currency TEXT NOT NULL DEFAULT 'CNY',
+                    source TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL,
+                    raw_hash TEXT,
+                    PRIMARY KEY(
+                        provider,
+                        train_code,
+                        from_station,
+                        to_station,
+                        seat_type
+                    )
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_train_od_fare_edge_from
+                ON train_od_fare_edge(provider, from_station, price)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_train_od_fare_edge_train
+                ON train_od_fare_edge(provider, train_no, from_station_no, to_station_no)
                 """
             )
 
