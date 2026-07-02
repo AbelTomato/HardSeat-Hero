@@ -4,13 +4,13 @@ import heapq
 from collections import defaultdict
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from time import perf_counter
 
 from app.domain.models import RouteQuery, RouteSearchResponse, SeatPrice, TrainSegment, TransferPlan
 from app.services.route_search import StreamSnapshot
-from app.services.static_price_repository import SQLiteStaticPriceRepository, TrainOdPriceSnapshot
+from app.services.static_price_repository import SQLiteStaticPriceRepository, TrainOdFareEdge, TrainOdPriceSnapshot
 
 
 MAX_RETURNED_PLANS = 10
@@ -72,8 +72,7 @@ class TimeExpandedRouteSearchEngine:
         }
 
     async def _search_plans(self, query: RouteQuery) -> list[TransferPlan]:
-        service_dates = [query.date + timedelta(days=offset) for offset in range(3)]
-        rows = self.repository.query_train_od_prices(self.provider, service_dates)
+        rows = self._load_edges(query)
         edges_by_station: dict[str, list[TrainOdPriceSnapshot]] = defaultdict(list)
         for row in rows:
             edges_by_station[row.from_station].append(row)
@@ -135,6 +134,55 @@ class TimeExpandedRouteSearchEngine:
 
         plans.sort(key=self._plan_sort_key)
         return plans[:MAX_RETURNED_PLANS]
+
+    def _load_edges(self, query: RouteQuery) -> list[TrainOdPriceSnapshot]:
+        fare_edges = self.repository.query_train_od_fare_edges(self.provider)
+        if fare_edges:
+            return [
+                materialized
+                for edge in fare_edges
+                for materialized in self._materialize_fare_edge(edge, query)
+            ]
+
+        service_dates = [query.date + timedelta(days=offset) for offset in range(3)]
+        return self.repository.query_train_od_prices(self.provider, service_dates)
+
+    def _materialize_fare_edge(self, edge: TrainOdFareEdge, query: RouteQuery) -> list[TrainOdPriceSnapshot]:
+        materialized: list[TrainOdPriceSnapshot] = []
+        for base_day_offset in range(3):
+            base_date = query.date + timedelta(days=base_day_offset)
+            depart_at = datetime.combine(
+                base_date + timedelta(days=edge.depart_day_offset),
+                edge.depart_time,
+                tzinfo=timezone.utc,
+            )
+            arrive_at = datetime.combine(
+                base_date + timedelta(days=edge.arrive_day_offset),
+                edge.arrive_time,
+                tzinfo=timezone.utc,
+            )
+            if arrive_at <= depart_at:
+                arrive_at += timedelta(days=1)
+            materialized.append(
+                TrainOdPriceSnapshot(
+                    provider=edge.provider,
+                    service_date=base_date,
+                    train_no=edge.train_no,
+                    train_code=edge.train_code,
+                    from_station=edge.from_station,
+                    to_station=edge.to_station,
+                    from_station_no=edge.from_station_no,
+                    to_station_no=edge.to_station_no,
+                    depart_at=depart_at,
+                    arrive_at=arrive_at,
+                    duration_minutes=edge.duration_minutes,
+                    seat_type=edge.seat_type,
+                    price=edge.price,
+                    source=edge.source,
+                    fetched_at=edge.fetched_at,
+                )
+            )
+        return materialized
 
     def _can_take(self, edge: TrainOdPriceSnapshot, state: TimeExpandedSearchState, query: RouteQuery) -> bool:
         if state.arrive_at is None:

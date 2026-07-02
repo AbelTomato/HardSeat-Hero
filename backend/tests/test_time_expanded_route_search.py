@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 
 import pytest
 
 from app.domain.models import RouteQuery
-from app.services.static_price_repository import SQLiteStaticPriceRepository
+from app.services.static_price_repository import SQLiteStaticPriceRepository, TrainOdFareEdge
 from app.services.time_expanded_route_search import TimeExpandedRouteSearchEngine
 
 
@@ -51,6 +51,45 @@ def insert_od_row(
                 datetime(2026, 6, 26, 8, 0, tzinfo=timezone.utc).isoformat(),
             ),
         )
+
+
+def insert_fare_edge(
+    repository: SQLiteStaticPriceRepository,
+    *,
+    train_no: str,
+    from_station: str,
+    to_station: str,
+    depart_time: time,
+    arrive_time: time,
+    price: str,
+    provider: str = "12306-public-price",
+    depart_day_offset: int = 0,
+    arrive_day_offset: int = 0,
+    seat_type: str = "二等座",
+) -> None:
+    repository.upsert_train_od_fare_edges(
+        provider,
+        [
+            TrainOdFareEdge(
+                provider=provider,
+                train_no=train_no,
+                train_code=train_no,
+                from_station=from_station,
+                to_station=to_station,
+                from_station_no=1,
+                to_station_no=2,
+                depart_time=depart_time,
+                arrive_time=arrive_time,
+                depart_day_offset=depart_day_offset,
+                arrive_day_offset=arrive_day_offset,
+                duration_minutes=120,
+                seat_type=seat_type,
+                price=Decimal(price),
+                source="fixture-fare-edge",
+                fetched_at=datetime(2026, 6, 26, 8, 0, tzinfo=timezone.utc),
+            )
+        ],
+    )
 
 
 @pytest.mark.asyncio
@@ -164,3 +203,50 @@ async def test_time_expanded_search_does_not_require_provider_argument(tmp_path)
     response = await engine.search(RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1)))
 
     assert response.plans[0].total_price == Decimal("309.0")
+
+
+@pytest.mark.asyncio
+async def test_time_expanded_search_reads_train_od_fare_edges(tmp_path) -> None:
+    repository = SQLiteStaticPriceRepository(tmp_path / "static_prices.sqlite3")
+    insert_fare_edge(
+        repository,
+        train_no="D1",
+        from_station="北京",
+        to_station="上海",
+        depart_time=time(8, 0),
+        arrive_time=time(10, 0),
+        price="309.0",
+    )
+
+    engine = TimeExpandedRouteSearchEngine(repository)
+    response = await engine.search(RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 12), max_transfers=0))
+
+    assert len(response.plans) == 3
+    segment = response.plans[0].segments[0]
+    assert segment.train_no == "D1"
+    assert segment.depart_at == datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
+    assert segment.arrive_at == datetime(2026, 7, 12, 10, 0, tzinfo=timezone.utc)
+    assert segment.source == "fixture-fare-edge"
+
+
+@pytest.mark.asyncio
+async def test_time_expanded_search_expands_cross_day_fare_edge(tmp_path) -> None:
+    repository = SQLiteStaticPriceRepository(tmp_path / "static_prices.sqlite3")
+    insert_fare_edge(
+        repository,
+        train_no="K1",
+        from_station="北京",
+        to_station="广州",
+        depart_time=time(22, 0),
+        arrive_time=time(8, 0),
+        depart_day_offset=0,
+        arrive_day_offset=1,
+        price="250.0",
+    )
+
+    engine = TimeExpandedRouteSearchEngine(repository)
+    response = await engine.search(RouteQuery(from_station="北京", to_station="广州", date=date(2026, 7, 12), max_transfers=0))
+
+    segment = response.plans[0].segments[0]
+    assert segment.depart_at == datetime(2026, 7, 12, 22, 0, tzinfo=timezone.utc)
+    assert segment.arrive_at == datetime(2026, 7, 13, 8, 0, tzinfo=timezone.utc)
