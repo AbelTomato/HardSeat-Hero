@@ -71,6 +71,48 @@ uvicorn app.main:app --reload --port 8000
 
 `time-expanded` 在线搜索只读本地 SQLite 的时间扩展图快照表，不触发 12306 远程 fallback，也不调用 `TrainDataProvider.search_segments()`。本地数据缺失时返回无方案；覆盖不足需要通过静态库诊断和后续离线刷新流程处理。静态公布票价不等于实时有票，当前时间扩展图也不宣称具备全国完整覆盖。
 
+全量快照爬取基础边：
+
+```powershell
+backend\.venv\Scripts\python.exe backend\scripts\crawl_time_expanded_full_snapshot.py `
+  --db data\static_prices.sqlite3 `
+  --provider full-snapshot `
+  --date 2026-07-12 `
+  --train-info-concurrency 4 `
+  --price-concurrency 2 `
+  --train-info-delay 0.3 `
+  --price-delay 0.8 `
+  --max-retries 5 `
+  --resume
+```
+
+小规模验证：
+
+```powershell
+backend\.venv\Scripts\python.exe backend\scripts\crawl_time_expanded_full_snapshot.py `
+  --db data\static_prices.sqlite3 `
+  --provider full-snapshot-dev `
+  --date 2026-07-12 `
+  --limit-trains 20 `
+  --price-concurrency 1 `
+  --price-delay 1.0 `
+  --resume
+```
+
+只统计任务规模，不请求票价、不写基础边：
+
+```powershell
+backend\.venv\Scripts\python.exe backend\scripts\crawl_time_expanded_full_snapshot.py `
+  --db data\static_prices.sqlite3 `
+  --provider full-snapshot-dry-run `
+  --date 2026-07-12 `
+  --dry-run
+```
+
+主要控制参数：`--limit-trains`、`--max-stops-per-train`、`--max-od-per-train`、`--min-station-gap`、`--include-seat-types`、`--train-info-concurrency`、`--price-concurrency`、`--train-info-delay`、`--price-delay`、`--max-retries`、`--resume`、`--retry-failed`。
+
+全量快照脚本会写入 `train_od_fare_edge` 基础边。`time-expanded` 搜索优先读取该表，并把相对时刻按查询日期展开为 3 天窗口。快速版本假设已导入车次默认每天可用；不处理运营日历、临时停运、实时余票或可购票状态。
+
 ### 静态票价库模式
 
 如果已经通过 `backend/scripts/refresh_static_prices.py` 刷新过本地静态票价库，可以使用 `static-price` provider 查询 SQLite 本地数据。
